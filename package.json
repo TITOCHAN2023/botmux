@@ -39,7 +39,7 @@
     "use:here": "node scripts/claim-botmux-bin.mjs",
     "creds:sync": "node dist/cli.js suspend --isolated",
     "switch:here": "bun run build && bun run use:here",
-    "test": "vitest run --project unit",
+    "test": "vitest run --project unit --project unit-serial",
     "test:all": "vitest run",
     "test:e2e": "vitest run --project e2e",
     "test:bun": "node scripts/run-bun-tests.mjs",
