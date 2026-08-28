@@ -7231,6 +7231,7 @@ import {
   buildImageCardElements,
   buildReplyCardFooter,
   prepareCardMarkdown,
+  REPLY_CARD_CONFIG,
   type CardUsageSnapshot,
   type LocalHomeLinkMode,
 } from './im/lark/md-card.js';
@@ -9483,7 +9484,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       }
 
       if (feedbackPolicy && effectiveResponseKind === 'final') {
-        const canonicalCard = { schema: '2.0', config: { update_multi: true }, body: { direction: 'vertical', elements: [...elements] } } as { schema: string; config: Record<string, unknown>; body: { direction: string; elements: unknown[] } };
+        const canonicalCard = { schema: '2.0', config: { ...REPLY_CARD_CONFIG }, body: { direction: 'vertical', elements: [...elements] } } as { schema: string; config: Record<string, unknown>; body: { direction: string; elements: unknown[] } };
         const feedbackElement = buildFeedbackElement(feedbackPolicy);
         const footerIndex = canonicalCard.body.elements.findIndex((element: any) => element?.element_id === 'botmux_reply_footer');
         canonicalCard.body.elements.splice(footerIndex >= 0 ? footerIndex : canonicalCard.body.elements.length, 0, feedbackElement);
@@ -9491,7 +9492,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         messageId = await dispatchPrimary(JSON.stringify(feedbackBaseCard), 'interactive');
       } else {
         messageId = await dispatchPrimary(JSON.stringify({
-          schema: '2.0', config: { update_multi: true }, body: { direction: 'vertical', elements },
+          schema: '2.0', config: { ...REPLY_CARD_CONFIG }, body: { direction: 'vertical', elements },
         }), 'interactive');
       }
     }
