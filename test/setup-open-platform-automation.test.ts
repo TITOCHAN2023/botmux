@@ -995,124 +995,89 @@ describe('未提交草稿卡死发版', () => {
     expect(failed.message).toMatch(/撤回审核中版本失败/);
   });
 
-  it('审核中提示按四种成因分开措辞（「已撤回」不许出现在什么都没撤时）', async () => {
-    // 这是发给管理员的 DM 文案。把「列表里没找到可撤回版本」说成「已撤回待审版本」是
-    // **事实错误**（一个字都没撤），措辞错了会侵蚀信任 —— 复审提的，我原来的三分支
-    // 把这两种情况合并了。判据是 withdrewPendingReview（只有真撤成功才置位）。
-    const run = async (label: string, opts: { optIn: boolean; hasInReview: boolean; cancelFails?: boolean }) => {
-      const dir = mkdtempSync(join(tmpdir(), `detail-${label}-`));
-      const sessionFile = join(dir, 'feishu-session.json');
-      writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
-      const sub = openPlatformSubscriptionMock('cli_dt');
-      const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-        const href = String(url);
-        if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
-        if (href.endsWith('/app/cli_dt/auth')) return new Response('<script>window.csrfToken="c"</script>', { status: 200 });
-        const path = href.replace(/^https:\/\/[^/]+/, '');
-        if (path.includes('/publish/cancel_commit/')) {
-          return opts.cancelFails ? Response.json({ code: 1, msg: 'cancel rejected' }) : Response.json({ code: 0 });
-        }
-        // 写锁始终不放开 → 一定会走到 under_review 分支
-        if (/\/(scope|privilege|safe_setting)\/update\/|\/robot\/switch\//.test(path)) {
-          return Response.json({ code: 10046, msg: '审核中, 请刷新' });
-        }
-        if (path.includes('/scope/all/')) {
-          return Response.json({ code: 0, data: { appScopeList: [{ id: 't1', name: 'im:message' }], userScopeList: [] } });
-        }
-        if (path.includes('/privilege/all/')) return Response.json({ code: 0, data: { privileges: [], scopeBiz: [] } });
-        if (path.includes('/app_version/list/')) {
-          return Response.json({ code: 0, data: { versions: opts.hasInReview
-            ? [{ appVersion: '1.0.5', versionId: 'rev-1', versionStatus: 1 }]
-            : [{ appVersion: '1.0.0', versionId: 'live', versionStatus: 2 }] } });
-        }
-        return sub.handle(href, init) ?? Response.json({ code: 0 });
-      }) as typeof fetch;
-      const r = await automateOpenPlatformSetup({
-        appId: 'cli_dt', sessionFilePath: sessionFile, fetchImpl, disableQrLogin: true,
-        scopeManifest: { scopes: { tenant: ['im:message'], user: [] } },
-        withdrawPendingReview: opts.optIn,
-      });
-      expect(r.ok).toBe(false);
-      if (r.ok) throw new Error('unreachable');
-      expect(r.reason).toBe('app_under_review');
-      return r.message;
-    };
-
-    // ① 未 opt-in
-    expect(await run('no-optin', { optIn: false, hasInReview: true })).toMatch(/本次未尝试撤回/);
-    // ② 撤回失败
-    expect(await run('cancel-fail', { optIn: true, hasInReview: true, cancelFails: true })).toMatch(/尝试撤回待审版本失败/);
-    // ④ opt-in 了但没有待审版本 —— 绝不能说「已撤回」
-    const nothingToCancel = await run('nothing', { optIn: true, hasInReview: false });
-    expect(nothingToCancel).toMatch(/未找到可撤回的待审版本/);
-    expect(nothingToCancel, '什么都没撤时不许说「已撤回」').not.toMatch(/已撤回待审版本/);
-  });
-
-  it('automation 撤回后配置重新可写；未 opt-in 时绝不撤', async () => {
-    const run = async (label: string, withdrawPendingReview: boolean) => {
-      const dir = mkdtempSync(join(tmpdir(), `wd-${label}-`));
-      const sessionFile = join(dir, 'feishu-session.json');
-      writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
-      const sub = openPlatformSubscriptionMock('cli_w');
-      const calls: string[] = [];
-      let withdrawn = false;
-      const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-        const href = String(url);
-        if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
-        if (href.endsWith('/app/cli_w/auth')) return new Response('<script>window.csrfToken="c"</script>', { status: 200 });
-        const path = href.replace(/^https:\/\/[^/]+/, '');
-        if (path.startsWith('/developers/')) calls.push(path);
-        if (path.includes('/publish/cancel_commit/')) { withdrawn = true; return Response.json({ code: 0 }); }
-        // 审核中 ⟹ 所有写操作被 10046 拒；撤回之后才放开（这正是线上的真实行为）
-        if (!withdrawn && /\/(scope|privilege|safe_setting)\/update\/|\/robot\/switch\//.test(path)) {
-          return Response.json({ code: 10046, msg: '审核中, 请刷新' });
-        }
-        if (path.includes('/scope/all/')) {
-          return Response.json({ code: 0, data: { appScopeList: [{ id: 't1', name: 'im:message' }], userScopeList: [] } });
-        }
-        if (path.includes('/privilege/all/')) return Response.json({ code: 0, data: { privileges: [], scopeBiz: [] } });
-        if (path.includes('/app_version/list/')) {
-          return Response.json({ code: 0, data: { versions: withdrawn
-            ? [{ appVersion: '1.0.5', versionId: 'rev-1', versionStatus: 2 }]
-            : [{ appVersion: '1.0.5', versionId: 'rev-1', versionStatus: 1 }] } });
-        }
-        if (path.includes('/app_version/create/')) return Response.json({ code: 0, data: { versionId: 'v-new' } });
-        return sub.handle(href, init) ?? Response.json({ code: 0 });
-      }) as typeof fetch;
-      const r = await automateOpenPlatformSetup({
-        appId: 'cli_w', sessionFilePath: sessionFile, fetchImpl, disableQrLogin: true,
-        scopeManifest: { scopes: { tenant: ['im:message'], user: [] } },
-        withdrawPendingReview,
-      });
-      return { r, calls };
-    };
-
-    // ① opt-in（缺 critical 权限的场景）：撤回 → 写锁解开 → 整条链路跑通
-    const withdrew = await run('optin', true);
-    expect(withdrew.calls.some(p => p.includes('/publish/cancel_commit/cli_w/rev-1')), '应撤回待审版本').toBe(true);
-    expect(withdrew.r.ok, `ok=false reason=${(withdrew.r as any).reason} msg=${(withdrew.r as any).message}`).toBe(true);
-    if (withdrew.r.ok) expect(withdrew.r.withdrewPendingReview).toBe(true);
-    // 顺序判据：撤回必须在**第一个写操作之前**，否则那个写会先被 10046 拒掉
-    const cancelAt = withdrew.calls.findIndex(p => p.includes('/publish/cancel_commit/'));
-    const firstWriteAt = withdrew.calls.findIndex(p => /\/(scope|privilege|safe_setting)\/update\/|\/robot\/switch\//.test(p));
-    expect(cancelAt).toBeGreaterThanOrEqual(0);
-    expect(firstWriteAt).toBeGreaterThan(cancelAt);
-
-    // 🔴 ② 未 opt-in（只补可选权限）：**一次都不许撤**，宁可失败也不掀别人排队的审批
-    const kept = await run('no-optin', false);
-    expect(kept.calls.some(p => p.includes('/publish/cancel_commit/')), '未 opt-in 绝不撤回').toBe(false);
-    expect(kept.r.ok).toBe(false);
-    if (!kept.r.ok) {
-      expect(kept.r.reason).toBe('app_under_review');
-      expect(kept.r.message).toMatch(/本次未尝试撤回/);
-    }
-  });
 });
 
 /**
  * 「提交后会不会秒过」的预判：`approval_nodes/get`。判据落在
  * `data.applyInstanceInfo.applyNodes` 的 `nodeType` 上。
  */
+describe('审核中：不自动撤回，只带出节流用的 versionId', () => {
+  /**
+   * 🔴 自动撤回已删（前提被推翻：**触发审批说明有配置不合规**，撤回重提会被同一条规则
+   * 再拦一次 ⟹ 用不可逆动作驱动死循环）。这里锁三件事：
+   *   ① 一次 `publish/cancel_commit` 都不许发
+   *   ② 带出 `inReviewVersionId` 供上层节流
+   *   ③ 读版本列表失败时**不许**把 app_under_review 覆盖成别的 reason
+   */
+  const runUnderReview = async (label: string, opts: { versionListFails?: boolean; hasInReview?: boolean }) => {
+    const dir = mkdtempSync(join(tmpdir(), `ur-${label}-`));
+    const sessionFile = join(dir, 'feishu-session.json');
+    writeStoredCookiesToSessionFile(sessionFile, [cookie()]);
+    const sub = openPlatformSubscriptionMock('cli_ur');
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(url);
+      if (href === 'https://ask.feishu.cn/') return new Response('ask home', { status: 200 });
+      if (href.endsWith('/app/cli_ur/auth')) return new Response('<script>window.csrfToken="c"</script>', { status: 200 });
+      const path = href.replace(/^https:\/\/[^/]+/, '');
+      if (path.startsWith('/developers/')) calls.push(path);
+      if (path.includes('/scope/all/')) {
+        return Response.json({ code: 0, data: { appScopeList: [{ id: 't1', name: 'im:message' }], userScopeList: [] } });
+      }
+      if (path.includes('/privilege/all/')) return Response.json({ code: 0, data: { privileges: [], scopeBiz: [] } });
+      // 写锁：robot/switch 抛 10046 → 走 under_review 分支
+      if (/\/(scope|privilege|safe_setting)\/update\/|\/robot\/switch\//.test(path)) {
+        return Response.json({ code: 10046, msg: '审核中, 请刷新' });
+      }
+      if (path.includes('/app_version/list/')) {
+        if (opts.versionListFails) return Response.json({ code: 1, msg: 'list denied' });
+        return Response.json({ code: 0, data: { versions: opts.hasInReview === false
+          ? [{ appVersion: '1.0.0', versionId: 'live', versionStatus: 2 }]
+          : [{ appVersion: '1.0.5', versionId: 'rev-1', versionStatus: 1 }] } });
+      }
+      return sub.handle(href, init) ?? Response.json({ code: 0 });
+    }) as typeof fetch;
+    const r = await automateOpenPlatformSetup({
+      appId: 'cli_ur', sessionFilePath: sessionFile, fetchImpl, disableQrLogin: true,
+      scopeManifest: { scopes: { tenant: ['im:message'], user: [] } },
+    });
+    return { r, calls };
+  };
+
+  it('🔴 一次 cancel_commit 都不发，并带出 inReviewVersionId 做节流 key', async () => {
+    const { r, calls } = await runUnderReview('normal', {});
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.reason).toBe('app_under_review');
+    // ① 绝不自动撤回
+    expect(calls.some(p => p.includes('/publish/cancel_commit/')), '不许自动撤回').toBe(false);
+    // ② 带出节流 key
+    expect(r.inReviewVersionId).toBe('rev-1');
+    // 文案必须说清「不会自己通过」+ 给人工路径，不能说「等审批通过就好」
+    expect(r.message).toMatch(/配置不合规/);
+    expect(r.message).toMatch(/撤回/);
+    expect(r.message).not.toMatch(/审批通过后 botmux 会在下次启动时自动补齐/);
+  });
+
+  it('没有待审版本时 inReviewVersionId 为空（上层据此不节流）', async () => {
+    const { r } = await runUnderReview('none', { hasInReview: false });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.reason).toBe('app_under_review');
+    expect(r.inReviewVersionId).toBeUndefined();
+  });
+
+  it('🔴 读版本列表失败只丢 versionId，不许污染 app_under_review 这个主信号', async () => {
+    // 分类是主信号，versionId 只是节流用的上下文；上下文取不到不能反过来把结论
+    // 改成 network / api_error —— 那会让管理员收到完全错误的诊断。
+    const { r } = await runUnderReview('list-fails', { versionListFails: true });
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.reason).toBe('app_under_review');
+    expect(r.inReviewVersionId).toBeUndefined();
+  });
+});
+
 describe('审批流程预判（秒过 vs 要人审）', () => {
   const flow = (nodes: Array<Record<string, unknown>>, extra: Record<string, unknown> = {}) =>
     ({ code: 0, data: { applyInstanceInfo: { applyNodes: nodes }, ...extra } });

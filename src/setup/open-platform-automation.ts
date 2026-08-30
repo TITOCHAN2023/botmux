@@ -214,10 +214,6 @@ export type OpenPlatformAutomationResult =
        * 「published」。有这个字段时**不能**对外宣称已发布。
        */
       versionWarning?: string;
-      /** 本次为了解开写锁**撤回了一个审核中的版本**（不可逆，只在 opt-in 时发生）。 */
-      withdrewPendingReview?: boolean;
-      /** 撤回审核中版本失败/状态未确认的原因。 */
-      withdrawWarning?: string;
       /**
        * 这一版提交后是否**秒过**（审批流全「自动通过」、零真人审批人）。
        * `undefined` = 判不出来（接口报错 / 算不出流程），调用方**不许**当成任一结论。
@@ -269,6 +265,12 @@ export type OpenPlatformAutomationResult =
       verifiedEventCount?: number;
       /** Exact published version ACK, preserved across later scope propagation failure. */
       versionId?: string;
+      /**
+       * `app_under_review` 专用：当前那个**待审版本**的 id（读不到时 undefined）。
+       * 只用于上层「同一个待审版本别重复打扰管理员」的节流 key —— undefined 时上层
+       * 自然退化成「不节流」，那是刻意的（见 automation 里 under_review 分支的注释）。
+       */
+      inReviewVersionId?: string;
     };
 
 export interface OpenPlatformAutomationOptions {
@@ -293,17 +295,6 @@ export interface OpenPlatformAutomationOptions {
    * 权限自愈 / VC 事件补订阅 / 批量修复这些跑在存量应用上的链路一律不传。
    */
   appJustCreated?: boolean;
-  /**
-   * 允许**撤回正在审核中的版本**，让被写锁的应用配置重新可写。
-   *
-   * 为什么要显式 opt-in：撤回不可逆，审批队列位置会丢（线上见过已排 3 天的）。所以只有
-   * 「不撤就永远用不了」的场景才该传 true —— 即**确实缺 critical 权限**：审核期间
-   * `scope/update` 被 `code=10046` 拒，权限永远补不上，等审批过了那一版也不含这些权限。
-   *
-   * 反过来，纯 opt-in 权限补齐（`im:feed_group_v1:*` 这类）**绝不能**传 true：为一个
-   * 没人在用的可选特性去掀掉别人排队中的审批，代价完全不对等。
-   */
-  withdrawPendingReview?: boolean;
   fetchImpl?: typeof fetch;
   scopeManifest?: ScopeManifest;
   /**
@@ -741,6 +732,48 @@ export function buildPrivilegeUpdatePayload(appId: string, privileges: OpenPlatf
  *
  * 调用方决定失败怎么处理（两处都是非致命，但一处 warn 一处进 result.warning）。
  */
+/**
+ * 只读探查「这个应用为什么可能卡审批」，给管理员 DM 里补一句**具体线索**。
+ *
+ * 为什么值得单独探一次：光说「可能是数据范围没配」是转述，说「实测这两条现在是
+ * 『全部/未配置』」才是证据 —— 人拿着它能直接去 console 对应位置改。审核锁只锁写，
+ * `privilege/all` 这类读接口照常可用（实测），所以这次探查在审核中也能成功。
+ *
+ * 全程 best-effort：任何一步失败就返回空串，绝不让「补充线索」这种附加信息把主流程
+ * （告诉管理员卡住了）搞坏。
+ */
+export async function inspectUnderReviewConfigHints(appId: string, brand?: 'feishu' | 'lark'): Promise<string> {
+  if (brand === 'lark') return '';
+  try {
+    const prepared = await prepareFeishuWebSession({ disableQrLogin: true, disableBytedcliFallback: true });
+    if (!prepared.ok) return '';
+    const clientResult = await createOpenPlatformApiClient(prepared.cookies);
+    if (!clientResult.ok) return '';
+    const post = clientResult.client.postJson;
+    const parts: string[] = [];
+    // ① 数据范围：把「还没收敛」的必填条目点出来（这正是最常见的卡审批原因）
+    try {
+      const state = extractOpenPlatformPrivileges(await post(`/developers/v1/privilege/all/${appId}`, {}));
+      const unnarrowed = state.privileges.filter(p => p.isRequired && !isPrivilegeRangeNarrowed(p));
+      if (unnarrowed.length > 0) {
+        const listed = unnarrowed.map(p => `${p.bizName || p.bizId}/${p.name || p.resource}`).join('、');
+        parts.push(`实测该应用有 ${unnarrowed.length} 项必填「数据范围」尚未收敛（${listed}）——大概率就是卡点`);
+      } else {
+        parts.push('实测必填「数据范围」都已收敛，卡点可能是别的规则（看审批详情）');
+      }
+    } catch { /* 读不到就不提数据范围 */ }
+    // ② 租户审批规则原文链接：比我们转述强 —— 万一卡的是别的规则，链接照样有用
+    try {
+      const rule: any = await post(`/developers/v1/config/audit_rule/${appId}`, {});
+      const auditUrl = pickString(asRecord(asRecord(rule).data), ['auditUrl']);
+      if (auditUrl) parts.push(`企业审批规则原文：${auditUrl}`);
+    } catch { /* 拿不到链接不影响其余线索 */ }
+    return parts.length > 0 ? `\n\n**线索**：${parts.join('；')}。` : '';
+  } catch {
+    return '';
+  }
+}
+
 async function narrowRequiredPrivilegeRanges(
   api: { postJson(path: string, body?: unknown): Promise<unknown> },
   appId: string,
@@ -1377,32 +1410,6 @@ export async function automateOpenPlatformSetup(
     return data;
   };
 
-  // 审核中的应用**整个配置是写锁的**（`scope/update` / `robot/switch` /
-  // `safe_setting/update` 全回 `code=10046`），所以要写任何东西之前先看有没有待审版本、
-  // 需要的话撤回它。顺序是硬要求：放在 redirect 白名单写入之后就已经晚了——那一步会
-  // 先被 10046 拒掉并记一条误导性的 redirectWarning。
-  //
-  // 只有调用方明确 opt-in（`withdrawPendingReview`）才撤：撤回不可逆、会丢审批队列位置。
-  // 详见该选项的注释与 {@link cancelPendingReviewVersion}。
-  let withdrewPendingReview = false;
-  let withdrawWarning: string | undefined;
-  if (options.withdrawPendingReview) {
-    try {
-      const versionsBefore = await postJson(`/developers/v1/app_version/list/${options.appId}`, {});
-      const inReviewId = findInReviewVersionId(versionsBefore);
-      if (inReviewId) {
-        const cancelled = await cancelPendingReviewVersion(postJson, options.appId, inReviewId);
-        if (cancelled.ok) {
-          withdrewPendingReview = true;
-        } else {
-          withdrawWarning = cancelled.message;
-        }
-      }
-    } catch (err: any) {
-      withdrawWarning = `读取版本列表以判断是否需要撤回失败: ${safeErrorMessage(err)}`;
-    }
-  }
-
   // redirect 白名单：csrf 一就位就立刻写,**不再留到流程末尾**。
   // 后面的 scope 读取 / robot 与事件开关 / 核心事件回读 任意一步失败都会提前
   // return,把白名单一起拖死;而白名单缺失是 authorize 的**硬失败**(20029,用户
@@ -1556,29 +1563,44 @@ export async function automateOpenPlatformSetup(
     // 归因放在这里是可行的（它无条件执行），但别据此以为前面没有写操作：真要提前
     // 识别 10046，得去看那几个 warning 而不是指望这里最先命中。
     if (openPlatformUnderReview(err)) {
-      // 走到这里说明写锁还在。四种成因要分开说，否则管理员不知道该等还是该动手：
-      //   ① 压根没允许撤回（opt-in 未开）——比如只是补可选权限，本来就不该掀别人的审批
-      //   ② 允许了但撤回失败（withdrawWarning 有值）
-      //   ③ 允许了、**真撤了**，但写锁仍未释放（另有待审版本 / 释放有延迟）
-      //   ④ 允许了、但列表里**根本没找到**审核中版本 —— 什么都没撤
-      // ③④ 必须分开：把④说成「已撤回」是**事实错误**（一个字都没撤），而这是发给
-      // 管理员的 DM，措辞错了会侵蚀信任。判据是 withdrewPendingReview（真撤成功才置位）。
-      const detail = !options.withdrawPendingReview
-        ? '（本次未尝试撤回待审版本：只有缺必需权限时才会自动撤回，以免掀掉正在排队的审批）'
-        : withdrawWarning
-          ? `（尝试撤回待审版本失败：${withdrawWarning}）`
-          : withdrewPendingReview
-            ? '（已撤回待审版本但写锁仍未释放，可能还有其它待审版本或需稍后重试）'
-            : '（未找到可撤回的待审版本，但配置仍被锁定——可能是刚提交的版本尚未出现在列表里，或写锁释放有延迟）';
+      // ⚠️ **不自动撤回待审版本**（曾经写过，已删）。原先的推理是「缺必需权限 + 审核中
+      // = 权限永远补不上 ⟹ 撤回是唯一出路」，那默认了「审批是中性的排队机制」。实际
+      // **触发审批说明有配置不合规**：模板建的应用出生带「数据范围=全部」，正是租户
+      // 审批规则里「申请全员范围要额外说明理由、视情况加签至 CEO-2」那一档（见
+      // {@link isPrivilegeRangeNarrowed} 的注释），而 narrowRequiredPrivilegeRanges
+      // 只收窄**新**版本 ⟹ 卡住的必然是没收窄过的旧版。
+      //
+      // ⟹ 撤回重提交会被**同一条规则再拦一次**，等于用不可逆动作（丢掉审批队列位置，
+      // 线上见过排 18 / 23 天且不属于本机 owner 的）驱动一个死循环。更一般地：**审批是
+      // 规则驱动的闸，不是队列**，撤回不绕过规则、只丢位置 —— 所以即便存在「配置合规
+      // 但仍进审批」的情形，自动撤回照样不解决问题。正确处置是**告诉人、让人修配置**。
+      //
+      // 取待审版本 id 只为给上层做「同一个待审版本别重复打扰」的节流 key。这次读是
+      // 只读（审核锁下照常可读）、且只在失败路径发生，常态零开销。
+      //
+      // ⚠️ 读失败必须降级成「没有 versionId」，**绝不能把已经确定的 app_under_review
+      // 覆盖成 network / api_error**：分类是主信号，versionId 只是节流用的上下文，
+      // 上下文取不到不能反过来污染主信号。拿不到 id 时上层自然退化成「不节流」——
+      // 那也正是我们要的：「撞了 10046 却找不到待审版本」意味着模型与实际不一致，
+      // 每次都值得说一遍（万一是我们判据自己有 bug，节流会掐掉唯一的信号）。
+      let inReviewVersionId: string | undefined;
+      try {
+        inReviewVersionId = findInReviewVersionId(
+          await postJson(`/developers/v1/app_version/list/${options.appId}`, {}),
+        );
+      } catch { /* 拿不到就不节流，见上 */ }
       return {
         ok: false,
         reason: 'app_under_review',
         message:
           '应用正在飞书审核中，开放平台暂时锁定了它的配置写入（权限申请、机器人能力、回调白名单都改不了）。'
-          + `${detail}审批通过后 botmux 会在下次启动时自动补齐。`,
+          + '**审批被触发通常意味着有配置不合规**（最常见：权限的「数据范围」没配，默认成「全部/全员」，'
+          + '撞上租户「非必要不申请全员数据」的加签规则）。需要人工处理：到开放平台看审批详情 → 修掉不合规项 '
+          + '→ 撤回该待审版本 → 重新提交。注意：撤回后直接重提**不会**自动通过，规则会再拦一次。',
         sessionFile,
         redirectConfigured,
         redirectWarning,
+        inReviewVersionId,
       };
     }
     return {
@@ -1928,8 +1950,6 @@ export async function automateOpenPlatformSetup(
       redirectWarning,
       versionReused,
       versionWarning,
-      withdrewPendingReview,
-      withdrawWarning,
       approvalAutoPassed,
       approvalHumanApprovers,
       ...(options.requireVerifiedEvents
@@ -3136,9 +3156,14 @@ export function findInReviewVersionId(payload: unknown): string | undefined {
  * 与既有的 `publish/commit/<appId>/<versionId>` 完全对称。当时用页面内 hook 拦下了
  * 请求所以没有真撤掉别人的审批。
  *
- * ⚠️ **撤回不可逆**：审批队列位置会丢，人家可能已经走到第几个审批人了。所以调用它的
- * 前提由上层把住（见 `withdrawPendingReview` 选项）——只在「确实缺 critical 权限、
- * 不撤就永远用不了」时才撤，纯 opt-in 权限补齐绝不打扰正在排队的审批。
+ * 🔴 **当前没有任何自动调用方，这是刻意的。** 曾经在「缺必需权限 + 审核中」时自动撤，
+ * 后来判定那是错的：**触发审批通常意味着有配置不合规**（最常见是数据范围默认「全部」，
+ * 撞租户加签规则），撤回重提会被同一条规则再拦一次 ⟹ 等于用不可逆动作（丢掉审批队列
+ * 位置，线上见过排 18 / 23 天的）驱动一个死循环。更一般地：**审批是规则驱动的闸，不是
+ * 队列**，撤回不绕过规则、只丢位置。所以正确处置是告诉人、让人改配置后自己撤。
+ *
+ * 保留它是为了「检测」与将来可能的**人工辅助**入口（比如显式命令）。若要再接自动调用，
+ * 先回答「撤回之后凭什么这次能过」—— 答不上就不该撤。
  *
  * 撤回后**回读确认**：`cancel_commit` 返回 code=0 不等于状态真的变了（同一个坑在
  * `publish/commit` 上已经栽过一次，见 {@link isVersionCommitted}）。
@@ -3191,10 +3216,15 @@ const APPROVAL_FLOW_AUTO_NODE_TYPES = new Set(['自动通过', 'Auto approved'])
 /**
  * 解析 `approval_nodes/get` 的返回，判断这一版提交后是否会自动通过。
  *
- * ⚠️ **绝不要用同一响应里的 `canAutoApproval` 字段做判据**——实测它与「会不会秒过」
- * 无关，用它会把判断做**反**：`Modern审核(Claude@cn1)` 是 `canAutoApproval:false` 而
- * 流程节点明写「自动通过」；另一台反而是 `true` 但压根没有待发布版本、算不出流程。
- * 判据只能落在 `applyNodes` 的节点类型上。
+ * ⚠️ **两个「名字像在回答这个问题、实际答的是另一个」的字段，都不能当判据**：
+ *
+ * | 字段 | 来源 | 实测 | 真实语义 |
+ * |---|---|---|---|
+ * | `canAutoApproval` | 同一个 `approval_nodes/get` 响应 | 秒过那台是 **false**、无待发布版本那台反而 **true** | 更像「理论上能否免审」，与本次会不会秒过**相反** |
+ * | `ApprovalType` | `config/audit_rule` | 秒过/要人审的 **4 台全是 1**，只有无待发布版本那台是 0 | 更像「有没有审批流」 |
+ *
+ * 两个都跨 5～6 台实测过。判据只能落在 `applyNodes` 的节点类型上 —— 上面那张表是为了
+ * 让后人别图省事去读那两个字段（名字比 `applyNodes` 好懂得多，正因如此才危险）。
  *
  * ⚠️ 解析路径是 `data.applyInstanceInfo.applyNodes`。**不是** `approvalNodes.nodes`
  * ——按那个路径读，跨 6 台 bot 全部返回空数组，「所有输入同一输出」正是判据失效的

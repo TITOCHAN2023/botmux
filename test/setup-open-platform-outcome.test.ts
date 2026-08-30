@@ -61,10 +61,6 @@ describe('classifySetupOpenPlatformOutcome', () => {
     expect(classifySetupOpenPlatformOutcome(
       success({ versionWarning: '版本 v1 提交后回读仍是「未提交审核」草稿' }),
     ).status).toBe('ready_with_warnings');
-    // 撤回审核中版本失败也一样：写锁没解开，后续权限补齐都会被拒。
-    expect(classifySetupOpenPlatformOutcome(
-      success({ withdrawWarning: '版本 v9 撤回后回读仍是「审核中」' }),
-    ).status).toBe('ready_with_warnings');
     // 反面：两者都没有时仍是纯 ready（别把正常路径顺手拖成 warning）
     expect(classifySetupOpenPlatformOutcome(success()).status).toBe('ready');
   });

@@ -77,7 +77,7 @@ describe('checkRequiredScopes — opt-in optional-scope auto-top-up', () => {
     const topUpIdx = region.indexOf('const toppedUp = await tryAutoFixScopes');
     // 成功判据必须是**真的补上了**（'fixed'），不能是「调用没抛」：应用审核中时
     // 开放平台连 scope/update 都拒（code=10046），一项都没写进去，报 topped-up 是谎报。
-    const returnIdx = region.indexOf("if (toppedUp === 'fixed') {", topUpIdx);
+    const returnIdx = region.indexOf("if (toppedUp.kind === 'fixed') {", topUpIdx);
     const allGrantedLogIdx = region.indexOf('all critical scopes granted');
     expect(topUpIdx).toBeGreaterThanOrEqual(0);
     expect(returnIdx).toBeGreaterThan(topUpIdx);
@@ -96,25 +96,8 @@ describe('tryAutoFixScopes — silent / disableQrLogin plumbing', () => {
   // 字符宽度 —— 这段历史上因窗口太窄假红过三次（详见 fnRegionUntil 的注释）。
   const region = fnRegionUntil('async function tryAutoFixScopes(', "logger.warn(`[${larkAppId}] auto-fix error:");
 
-  /**
-   * 🔴 最高风险的一条护栏：**撤回审核中版本不可逆**（审批队列位置会丢，线上见过已排
-   * 3 天的、且不属于本机 owner）。只有「确实缺 critical 权限」才允许撤——那种情况下
-   * 审核期间 `scope/update` 被 `code=10046` 拒、权限永远补不上，撤回是唯一出路。
-   * 纯 opt-in 权限补齐（silent 路径，missingCritical 为空）绝不能撤。
-   *
-   * 断言 `missingCritical.length > 0` 这个**具体条件**，而不是「传了这个参数」：
-   * 写成 `withdrawPendingReview: true` 同样能通过「参数存在」类断言，却把护栏拆没了。
-   */
-  it('只在缺 critical 权限时才允许撤回审核中版本（不可逆操作的护栏）', () => {
-    // 两个条件都要在：`allowWithdraw !== false` 是给 99991672 那条「判据不可靠」的
-    // 路径留的一刀闸；`missingCritical.length > 0` 是「确实缺才撤」的本体。
-    expect(region).toContain("withdrawPendingReview: opts?.allowWithdraw !== false && missingCritical.length > 0,");
-    // 反面：绝不能是无条件 true
-    expect(region).not.toContain('withdrawPendingReview: true');
-  });
-
   it('accepts the disableQrLogin + silent opts', () => {
-    expect(region).toContain('opts?: { disableQrLogin?: boolean; silent?: boolean; allowWithdraw?: boolean; grantedScopeNames?: { tenant: string[]; user: string[] } }');
+    expect(region).toContain('opts?: { disableQrLogin?: boolean; silent?: boolean; grantedScopeNames?: { tenant: string[]; user: string[] } }');
   });
 
   it('threads grantedScopeNames into the Open Platform automation', () => {
@@ -136,7 +119,7 @@ describe('tryAutoFixScopes — silent / disableQrLogin plumbing', () => {
 
   it('skips the admin success DM when silent', () => {
     // the silent early-return must sit before getAdminOpenId is read for the DM
-    const silentIdx = region.indexOf("if (opts?.silent) return 'fixed';");
+    const silentIdx = region.indexOf("if (opts?.silent) return { kind: 'fixed' };");
     const adminIdx = region.indexOf('const adminOpenId = getAdminOpenId(bot);');
     expect(silentIdx).toBeGreaterThanOrEqual(0);
     expect(adminIdx).toBeGreaterThan(silentIdx);
@@ -181,20 +164,46 @@ describe('tryAutoFixScopes — silent / disableQrLogin plumbing', () => {
  * network-driven function); the automation-side filtering itself is covered
  * behaviorally in test/setup-open-platform-automation.test.ts.
  */
+describe('checkRequiredScopes — 审核中：提示人工 + 按待审版本节流', () => {
+  const region = fnRegionUntil(
+    "    if (autoFixed.kind === 'under_review') {",
+    '本次不重复打扰',
+  );
+
+  it('🔴 按待审版本节流，且状态落盘（不是内存态）', () => {
+    // 内存态每次 daemon 重启清零 ⟹ 卡 N 天发 N 条同样的 DM = 把要消灭的刷屏换个文案
+    // 请回来。所以必须走落盘 store，key 用待审版本 id。
+    expect(region).toContain('wasPendingReviewNotified(');
+    expect(region).toContain('config.session.dataDir');
+    expect(region).toContain('autoFixed.inReviewVersionId');
+  });
+
+  it('🔴 只有 DM 发送成功才记账（先记后发 = 一次失败就永久静默）', () => {
+    const dmIdx = region.indexOf('const delivered = await dmAdmin(');
+    const markIdx = region.indexOf('markPendingReviewNotified(');
+    expect(dmIdx, '要拿 dmAdmin 的返回值').toBeGreaterThanOrEqual(0);
+    expect(markIdx).toBeGreaterThan(dmIdx);
+    // 记账必须在 delivered 为真的分支里
+    expect(region).toMatch(/if \(delivered\) \{[\s\S]*markPendingReviewNotified\(/);
+  });
+
+  it('不说「等审批通过」，改为给人工修配置的可执行路径', () => {
+    // 触发审批通常意味着有配置不合规，那一版不会自己通过 —— 说「等」就是让人干等
+    expect(region).toMatch(/为什么会进审核/);
+    expect(region).toContain('Withdraw');
+    expect(region).toMatch(/直接撤回重提\*\*不管用\*\*/);
+    // 也要否掉「去权限管理页手动开通」这条无效路径
+    expect(region).toMatch(/手动点开通也\*\*无效\*\*/);
+  });
+
+  it('带上实测线索（数据范围现状 / 审批规则原文），而不是只转述可能原因', () => {
+    expect(region).toContain('inspectUnderReviewConfigHints(');
+  });
+});
+
 describe('checkRequiredScopes — 99991672 chicken-and-egg scope request set', () => {
   // 截到该分支真正的结尾（发完 self_manage 提示 DM 的那一句），同样不用固定字符宽度。
   const region = fnRegionUntil('if (infoData.code === 99991672) {', "'self_manage scope (auto-approved) missing'");
-
-  /**
-   * 🔴 99991672 路径**禁止自动撤回**：这里传给 tryAutoFixScopes 的 missingCritical 是
-   * 完整 BOTMUX_REQUIRED_SCOPES —— 不是「确认缺这些」，而是「连自己的 scope 列表都读
-   * 不到」（缺 self_manage）。护栏谓词 `missingCritical.length > 0` 在这条路径上恒真、
-   * 已知不可靠，而撤回不可逆：万一那个待审版本本就含全部权限，撤回纯粹白丢队列位置
-   * （线上见过排 18/23 天、且不属于本机 owner 的审批）。判据不可靠时宁可不动。
-   */
-  it('🔴 99991672 路径显式关掉撤回（谓词不可靠 + 动作不可逆）', () => {
-    expect(region).toContain('{ allowWithdraw: false }');
-  });
 
   it('asks for every botmux-required scope, not just self_manage', () => {
     // Passing only self_manage used to be cosmetic: the param never reached the
@@ -202,14 +211,14 @@ describe('checkRequiredScopes — 99991672 chicken-and-egg scope request set', (
     // log/DM text. Now that the manifest IS derived from these names, the list
     // has to be the real one or the next restart still finds scopes missing.
     expect(region).toMatch(/const requiredNow = BOTMUX_REQUIRED_SCOPES\.map\(s => \(\{ name: s\.name, desc: s\.desc \}\)\)/);
-    expect(region).toContain('tryAutoFixScopes(larkAppId, bot, brand, requiredNow, [], { allowWithdraw: false })');
+    expect(region).toContain('tryAutoFixScopes(larkAppId, bot, brand, requiredNow, [])');
   });
 
   it('still only runs on feishu and falls through to the manual deep-link DM', () => {
     expect(region).toContain("if (brand === 'feishu') {");
     // 自愈成功**或**「应用正在审核中」都直接返回：审核期间开放平台锁写，把 self_manage
     // 深链推给管理员是错误建议（点了也开不了），等审批通过下次重启自检即可。
-    expect(region).toContain("if (fixed !== 'failed') return;");
+    expect(region).toContain("if (fixed.kind !== 'failed') return;");
     expect(region).toContain('buildScopeDeepLink(bot.config.larkAppId, SELF_MANAGE_SCOPE, brand)');
   });
 });
@@ -254,19 +263,24 @@ describe('ensureVcMeetingEventsSubscribed — startup VC-event check-then-config
   });
 
   /**
-   * 审核中（`app_under_review`）时的建议必须是「等审批通过」，**不能**是「刷新登录态」：
-   * 审核期间开放平台锁定配置写入，刷 session 一点用没有（不是 session 问题）。给做不到
-   * 的建议比不给更糟 —— 用户会反复 `botmux setup` 却始终不见好。
+   * 审核中（`app_under_review`）的建议必须是**「需人工修配置后撤回重提」**，两种说法都
+   * 不许出现：
+   *   • 「刷新登录态」—— 审核锁住的是配置写入，不是 session 问题，刷了没用
+   *   • 「等审批通过就好」—— 触发审批通常意味着有配置不合规，那一版**不会自己通过**，
+   *     说「等」等于让人干等（这条是上一版的措辞，在前提被纠正后反了）
    */
-  it('审核中不给「刷新登录态」这种做不到的建议（改为等审批通过）', () => {
+  it('审核中给「人工修配置后撤回重提」，不给「刷新登录态」也不说「等审批通过」', () => {
     expect(region).toContain("result.reason === 'app_under_review'");
-    // 审核中走 info 而不是 warn：等待即自愈的状态不该反复报错刷屏
+    // 审核中走 info 而不是 warn：这是等人处理的状态，不该每次重启报错刷屏
     expect(region).toContain('VC event auto-subscribe deferred (app under review)');
-    // DM 文案二选一：审核中说「等审批」、其余仍说「刷新登录态」
-    expect(region).toContain('审批通过后执行');
+    // 必须给出可执行路径
+    expect(region).toContain('Withdraw');
+    expect(region).toMatch(/修掉不合规项/);
+    // 必须显式否掉两条无效建议
+    expect(region).toMatch(/刷新登录态无效/);
+    expect(region).toMatch(/不改配置直接撤回重提会被同一条规则再拦/);
+    // 非审核中的路径仍保留「刷新登录态」那条（它对 session 失效才是对的）
     expect(region).toContain('刷新飞书开放平台登录态');
-    // 审核中那句必须明确否掉刷登录态这条路，否则用户照旧去试
-    expect(region).toMatch(/审核期间飞书锁定了配置写入，刷新登录态也改不了/);
   });
 
   it('DMs the admin only when the auto-subscribe actually fails', () => {

@@ -690,10 +690,6 @@ async function finishOpenPlatformSetup(
     } else if (result.versionId) say(`   已提交发布版本: ${result.versionId}`);
     else if (result.publishSkipped) say('   本次配置无变更，已跳过发版（未创建新版本）。');
     else say('   已创建版本；未从响应中解析到 versionId，请到开放平台确认是否需要手动发布。');
-    if (result.withdrawWarning) {
-      say(`   ⚠️ 撤回审核中版本未成功：${result.withdrawWarning}`);
-      say('      配置写锁未解开；可到开放平台「版本管理与发布」→ 该版本详情 → Withdraw 手动撤回后重试。');
-    }
     say('');
     return outcome;
   }
