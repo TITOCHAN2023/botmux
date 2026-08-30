@@ -156,25 +156,38 @@ const FILE_WALL_MS = 240_000;
 
 const all = collectTestFiles(TEST_DIR).sort();
 
-// Snapshot the real home BEFORE the selector probe — the first `bun` this script
-// spawns, and therefore the first thing that can pollute it. Compared again after the
-// run in self-check mode.
+// Parsed before anything spawns bun: the canary home below depends on it, and a `const`
+// read before its declaration is a TDZ ReferenceError — the same runtime-only failure
+// class that made an earlier commit run 0 of 994 files.
+const selfCheck = process.argv.includes('--self-check');
+
+// In self-check mode, point the RUNNER's own home at a fresh empty directory before
+// anything spawns bun. Every `bun` this script starts is supposed to get its env from
+// `mintFencedEnv()`; if one does not, it inherits this canary and writes `.bun` into
+// it, which a cheap top-level listing then catches.
 //
-// WHY AN ASSERTION AND NOT JUST THE FENCE: the fence is a spawn-env argument, and
-// dropping it is a one-token edit that changes NO output. Measured: removing `env`
-// from the probe's `spawnSync` left the run exit 0 and green while writing
-// `.bun/install/cache/@t@/*.pile` into the inherited home. The invariant this whole
-// leg exists to protect was therefore unguarded by the leg itself.
-function snapshotHome() {
-  const home = process.env.HOME ?? process.env.USERPROFILE;
-  if (!home) return null;
+// WHY NOT SNAPSHOT THE REAL HOME: that was the first attempt and it was vacuous. A
+// top-level name diff only sees a `.bun` that did not exist BEFORE — and CI runs
+// `setup-bun` + `bun install` earlier in the job, so `.bun` always exists by then, as
+// it does on any developer machine. Measured: with a pre-created empty `.bun/`, an
+// unfenced probe wrote `.bun/install/cache/@t@/*.pile` and the top-level diff was
+// EMPTY, so the check reported "untouched" and the fence mutation stayed green. A
+// recursive snapshot would fix the blindness but is slow and picks up concurrent
+// noise from anything else using the home. An empty canary makes the invariant
+// top-level and unambiguous, and never touches the live home at all.
+const canaryHome = selfCheck ? mkdtempSync(join(realTmpdir(), 'botmux-bun-canary-')) : null;
+if (canaryHome) {
+  process.env.HOME = canaryHome;
+  process.env.USERPROFILE = canaryHome;
+}
+function canaryEntries() {
+  if (!canaryHome) return [];
   try {
-    return new Set(readdirSync(home));
+    return readdirSync(canaryHome);
   } catch {
-    return null;
+    return [];
   }
 }
-const homeBefore = snapshotHome();
 
 const deferred = loadDeferredSet(all);
 const allRunnable = all.filter(f => !deferred.has(f));
@@ -195,7 +208,6 @@ const extraArgs = process.argv.slice(2).filter(a => a !== '--self-check');
 // ReferenceError, verified), the count line still printed `994 files`, and the leg then
 // ran **0 of 994** — caught only by CI, on a green-looking headline. The failure lives
 // inside `runOne`, so nothing short of launching a child can see it.
-const selfCheck = process.argv.includes('--self-check');
 const hasOwnTimeout = extraArgs.some(a => a === '--timeout' || a.startsWith('--timeout='));
 
 // In self-check mode, run the guard for the selectors themselves: it is fast, has no
@@ -308,6 +320,8 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       // handler that normally removes them never runs.
       removeScratch(scratch);
     }
+    // Same for the canary: the check that normally deletes it is past the join.
+    if (canaryHome) removeScratch(canaryHome);
     process.exit(sig === 'SIGINT' ? 130 : 143);
   });
 }
@@ -461,29 +475,29 @@ if (incomplete) {
   process.exit(1);
 }
 
-// The home invariant, checked BEFORE the green summary for the same reason as
+// The fence invariant, checked BEFORE the green summary for the same reason as
 // completeness: a headline nobody can contradict is worse than a loud failure.
 //
-// Self-check only. A full run legitimately touches the real home in ways this script
-// does not control (bun's own resolution caches during `bun install`, a test that
-// deliberately writes there), so asserting it for every run would be a flake generator.
-// Self-check spawns exactly two bun processes, both fenced, and nothing else — an
-// entry appearing there means a fence went missing.
-if (selfCheck && homeBefore) {
-  const homeAfter = snapshotHome();
-  const added = homeAfter ? [...homeAfter].filter(e => !homeBefore.has(e)) : [];
-  if (added.length > 0) {
+// The canary home starts EMPTY and only this script's own bun spawns could write to
+// it, so any entry at all means a spawn inherited the runner's env instead of
+// `mintFencedEnv()`. No recursion needed, no live-home noise, no dependence on
+// whether the machine has used Bun before.
+if (canaryHome) {
+  const leaked = canaryEntries();
+  removeScratch(canaryHome);
+  if (leaked.length > 0) {
     console.error(
-      `\nbun test SELF-CHECK FAILED: the run wrote into the real home (${process.env.HOME}): `
-      + `${added.join(', ')}`,
+      `\nbun test SELF-CHECK FAILED: a bun spawn escaped the home fence and wrote `
+      + `${leaked.join(', ')} into the canary home.`,
     );
     console.error(
-      '  Every `bun` this script spawns must get its env from mintFencedEnv() — Bun touches '
-      + 'its user-level caches before any preload runs, so only the spawn env can prevent this.',
+      '  Every `bun` this script spawns must take its env from mintFencedEnv() — Bun '
+      + 'touches its user-level caches before any preload runs, so only the spawn env '
+      + 'can prevent this. On a real run that write lands in the developer\'s home.',
     );
     process.exit(1);
   }
-  console.log('bun test SELF-CHECK: real home untouched ✓');
+  console.log('bun test SELF-CHECK: every bun spawn stayed inside its fence ✓');
 }
 
 console.log(`\nbun test: ${runnable.length - failures.length}/${runnable.length} files green, ${failures.length} failing`);
