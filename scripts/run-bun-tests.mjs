@@ -133,13 +133,13 @@ function loadDeferredSet(files) {
   if (res.status !== 0 || res.error) {
     console.error('Failed to evaluate the bun-leg selectors:');
     console.error(res.stderr || res.error?.message || `exit ${res.status}`);
-    process.exit(1);
+    exitCleanly(1);
   }
   try {
     return new Set(JSON.parse(res.stdout));
   } catch {
     console.error(`Selector probe returned unparseable output: ${res.stdout.slice(0, 200)}`);
-    process.exit(1);
+    exitCleanly(1);
   }
 }
 
@@ -188,6 +188,19 @@ function canaryEntries() {
     return [];
   }
 }
+/**
+ * Exit, always removing the canary first.
+ *
+ * Used by EVERY exit path past the canary's creation rather than by each one
+ * remembering to clean up: the failure exits (selector probe throwing, no runnable
+ * files, the guard being deferred, an incomplete join) are exactly the ones a person
+ * adding a new early return forgets, and each leak is a permanent `mkdtemp` directory
+ * — the same lifecycle gap that leaked 51 scratch dirs earlier in this work.
+ */
+function exitCleanly(code) {
+  if (canaryHome) removeScratch(canaryHome);
+  process.exit(code);
+}
 
 const deferred = loadDeferredSet(all);
 const allRunnable = all.filter(f => !deferred.has(f));
@@ -195,7 +208,7 @@ const skipped = all.filter(f => deferred.has(f));
 
 if (allRunnable.length === 0) {
   console.error('Refusing to report success: no runnable files were found. Is the test/ directory present?');
-  process.exit(1);
+  exitCleanly(1);
 }
 
 const extraArgs = process.argv.slice(2).filter(a => a !== '--self-check');
@@ -219,7 +232,7 @@ if (selfCheck && !allRunnable.includes(SELF_CHECK_FILE)) {
     `Refusing to self-check: ${SELF_CHECK_FILE} is not in the runnable set. `
     + 'Either it was deleted or the selectors now defer it — both mean the leg is unguarded.',
   );
-  process.exit(1);
+  exitCleanly(1);
 }
 const runnable = selfCheck ? [SELF_CHECK_FILE] : allRunnable;
 // Keep concurrency moderate: many of these files spawn real daemons, ptys and
@@ -343,28 +356,12 @@ function runOne(file) {
     // INHERITED home even on a fenced run. Setting HOME here means the fence
     // exists from process birth; the preload then narrows it further and installs
     // the in-process `node:os` override. Child processes inherit this too.
-    const scratch = mkdtempSync(join(realTmpdir(), 'botmux-bun-child-'));
-    const childTmp = join(scratch, 'tmp');
-    const childHome = join(scratch, 'home');
-    mkdirSync(childTmp);
-    mkdirSync(childHome);
-
-    const childEnv = {
-      ...process.env,
-      TMPDIR: childTmp,
-      TMP: childTmp,
-      TEMP: childTmp,
-      HOME: childHome,
-      USERPROFILE: childHome,
-    };
-    // Exact-path pointers at a live Botmux home never go through `homedir()`, so
-    // they have to be dropped in the spawn env too — not just in the preload.
-    // Mirrors test/helpers/fence-home-env.ts; kept here as well because that file
-    // only runs after Bun has started.
-    delete childEnv.BOTS_CONFIG;
-    delete childEnv.PM2_HOME;
-    delete childEnv.PLUGIN_PM2_HOME;
-
+    //
+    // Both this and the selector probe go through `mintFencedEnv()` — deliberately
+    // ONE definition. They were duplicated at first with identical values, which is
+    // the shape that rots: the next variable added to one copy silently leaves the
+    // other unfenced, and the self-check's own error text promises a single point.
+    const { scratch, env: childEnv } = mintFencedEnv();
     // `detached: true` puts the child in its OWN process group, so a kill can take
     // the whole tree — `child.kill()` alone signals only the Bun parent and leaves
     // servers/ptys it spawned running (measured: cancelling a run left `bun test`
@@ -472,7 +469,7 @@ if (incomplete) {
   if (workerErrors.length === 0) {
     console.error('  no worker crashed, yet files are missing — results cannot be trusted');
   }
-  process.exit(1);
+  exitCleanly(1);
 }
 
 // The fence invariant, checked BEFORE the green summary for the same reason as
