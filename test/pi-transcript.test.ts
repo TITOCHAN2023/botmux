@@ -395,6 +395,30 @@ describe('drainPiTranscript: turn terminal contract', () => {
     expect(events.some((e) => e.text === 'ANSWER')).toBe(true);
   });
 
+  it('a SECOND declaration marker (resume re-fires session_start) does not swallow a held failure', () => {
+    // `session_start` fires on every Pi start, resume included, so declaration
+    // markers are not unique. Guarding only the FIRST one let a later
+    // declaration fall through to the "turn settled cleanly" branch and drop
+    // the hold — turning "pi died mid-turn, then botmux resumed it" into a
+    // silently lost failure. Reported in review after the first-declaration-only
+    // guard shipped; verified against this exact shape.
+    const path = writeTranscript([
+      sessionHeader(),
+      turnSettled(null, '2026-08-03T05:13:30.000Z'),   // announce (first start)
+      userMsg('原始问题'),
+      assistantFinal('error', '', '2026-08-03T05:14:01.000Z', 'upstream stream error: service unavailable'),
+      turnSettled(null, '2026-08-03T05:14:30.000Z'),   // announce again (resume)
+    ]);
+    const t0 = 6_000_000;
+    const first = drainPiTranscript(path, 0, t0);
+    expect(first.events.filter((e) => e.terminalStatus === 'failed')).toHaveLength(0);
+    // The hold must survive the second declaration and still reach the backstop.
+    const late = drainPiTranscript(path, first.newOffset, t0 + PI_TURN_BOUNDARY_TIMEOUT_MS);
+    const fails = late.events.filter((e) => e.terminalStatus === 'failed');
+    expect(fails).toHaveLength(1);
+    expect(fails[0].terminalErrorCode).toBe('codex_upstream_error');
+  });
+
   it('emits assistant_final on stopReason:length as a completed (truncated) answer', () => {
     const path = writeTranscript([
       sessionHeader(),
