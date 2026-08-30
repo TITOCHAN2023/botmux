@@ -762,7 +762,10 @@ export async function inspectUnderReviewConfigHints(appId: string, brand?: 'feis
         parts.push('实测必填「数据范围」都已收敛，卡点可能是别的规则（看审批详情）');
       }
     } catch { /* 读不到就不提数据范围 */ }
-    // ② 租户审批规则原文链接：比我们转述强 —— 万一卡的是别的规则，链接照样有用
+    // ② 租户审批规则原文链接：比我们转述强 —— 万一卡的是别的规则，链接照样有用。
+    // body 传空 `{}` 即可：实测跨 3 台（有草稿 / 审核中 / 无待发布版本）对照过
+    // `{}` 与 `{versionId}`，两者返回**逐字相同**（都拿到 auditUrl + 452 字的
+    // auditSummary）⟹ 该端点返回的是**租户级**规则、与具体版本无关，不必透传 versionId。
     try {
       const rule: any = await post(`/developers/v1/config/audit_rule/${appId}`, {});
       const auditUrl = pickString(asRecord(asRecord(rule).data), ['auditUrl']);
