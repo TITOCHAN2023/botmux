@@ -62,6 +62,43 @@ function collectTestFiles(dir) {
   return found;
 }
 
+/**
+ * A scratch dir plus the env that confines a Bun process to it from BIRTH.
+ *
+ * Bun boots, resolves its preload's imports and touches its user-level caches
+ * BEFORE any of our JS runs, so an in-process fence cannot cover that window —
+ * only the spawn env can. Every `bun` this script starts must go through here;
+ * a single unfenced spawn writes into the developer's real home and defeats the
+ * whole point of the leg (measured: an unfenced probe left
+ * `.bun/install/cache/@t@/*.pile` in the inherited HOME).
+ *
+ * Returns the dir so the caller can delete it — `mkdtemp` never reuses a name,
+ * so a leaked one accumulates rather than being overwritten.
+ */
+function mintFencedEnv() {
+  const scratch = mkdtempSync(join(realTmpdir(), 'botmux-bun-child-'));
+  const childTmp = join(scratch, 'tmp');
+  const childHome = join(scratch, 'home');
+  mkdirSync(childTmp);
+  mkdirSync(childHome);
+
+  const env = {
+    ...process.env,
+    TMPDIR: childTmp,
+    TMP: childTmp,
+    TEMP: childTmp,
+    HOME: childHome,
+    USERPROFILE: childHome,
+  };
+  // Exact-path pointers at a live Botmux home never go through `homedir()`, so
+  // they have to be dropped in the spawn env too — not just in the preload.
+  // Mirrors test/helpers/fence-home-env.ts; kept here as well because that file
+  // only runs after Bun has started.
+  for (const name of ['BOTS_CONFIG', 'PM2_HOME', 'PLUGIN_PM2_HOME']) delete env[name];
+
+  return { scratch, env };
+}
+
 // The exclusion selectors live in test/helpers/bun-leg-selectors.ts so that a guard
 // can import and exercise the REAL logic (test/bun-runner-selectors.test.ts) instead
 // of a hand-copied duplicate that drifts. They are loaded through Bun because this
@@ -71,16 +108,28 @@ function collectTestFiles(dir) {
 // so it is already a hard dependency, and shelling out keeps the runner free of a
 // TS-transform requirement of its own.
 function loadDeferredSet(files) {
+  // The file list goes over STDIN, not argv. At 1159 files it is 42,604 bytes in a
+  // single argument: comfortably under Linux's MAX_ARG_STRLEN (131,072) but 130% of
+  // Windows' 32,767-character command-line limit, where it would fail outright — and
+  // the failure would grow in with the suite rather than showing up in review.
   const probe = [
     "const { isDeferredFromBunLeg } = await import('./test/helpers/bun-leg-selectors.ts');",
     "const { readFileSync } = await import('node:fs');",
     'const out = [];',
-    'for (const f of JSON.parse(process.argv[1] ?? "[]")) {',
-    '  if (isDeferredFromBunLeg(readFileSync(f, "utf8"))) out.push(f);',
+    "for (const f of JSON.parse(readFileSync(0, 'utf8') || '[]')) {",
+    "  if (isDeferredFromBunLeg(readFileSync(f, 'utf8'))) out.push(f);",
     '}',
     'process.stdout.write(JSON.stringify(out));',
   ].join('\n');
-  const res = spawnSync('bun', ['-e', probe, JSON.stringify(files)], { encoding: 'utf8' });
+  // This spawn happens BEFORE any test runs, so it is the first thing that could
+  // pollute the real home — fence it exactly like a test child.
+  const { scratch, env } = mintFencedEnv();
+  let res;
+  try {
+    res = spawnSync('bun', ['-e', probe], { encoding: 'utf8', input: JSON.stringify(files), env });
+  } finally {
+    removeScratch(scratch);
+  }
   if (res.status !== 0 || res.error) {
     console.error('Failed to evaluate the bun-leg selectors:');
     console.error(res.stderr || res.error?.message || `exit ${res.status}`);
@@ -94,19 +143,73 @@ function loadDeferredSet(files) {
   }
 }
 
+// Bun's per-test default is 5s, but the unit project runs at vitest's 30s and
+// individual files raise it further via `vi.setConfig({ testTimeout })` — up to
+// 180s for the mojo suites. `bun test` has no runtime equivalent for that
+// per-file call (the shim accepts it as a no-op), so the ceiling comes from the
+// CLI. A generous timeout cannot turn a failing test green; it only stops a slow
+// one from being cut short.
+const TEST_TIMEOUT_MS = 180_000;
+// Hard wall per file, above the per-test ceiling: a file that wedges (waiting on
+// a pty, a lock, a socket) must not hold the whole leg open.
+const FILE_WALL_MS = 240_000;
+
 const all = collectTestFiles(TEST_DIR).sort();
 
+// Snapshot the real home BEFORE the selector probe — the first `bun` this script
+// spawns, and therefore the first thing that can pollute it. Compared again after the
+// run in self-check mode.
+//
+// WHY AN ASSERTION AND NOT JUST THE FENCE: the fence is a spawn-env argument, and
+// dropping it is a one-token edit that changes NO output. Measured: removing `env`
+// from the probe's `spawnSync` left the run exit 0 and green while writing
+// `.bun/install/cache/@t@/*.pile` into the inherited home. The invariant this whole
+// leg exists to protect was therefore unguarded by the leg itself.
+function snapshotHome() {
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (!home) return null;
+  try {
+    return new Set(readdirSync(home));
+  } catch {
+    return null;
+  }
+}
+const homeBefore = snapshotHome();
+
 const deferred = loadDeferredSet(all);
-const runnable = all.filter(f => !deferred.has(f));
+const allRunnable = all.filter(f => !deferred.has(f));
 const skipped = all.filter(f => deferred.has(f));
 
-if (runnable.length === 0) {
+if (allRunnable.length === 0) {
   console.error('Refusing to report success: no runnable files were found. Is the test/ directory present?');
   process.exit(1);
 }
 
-const extraArgs = process.argv.slice(2);
+const extraArgs = process.argv.slice(2).filter(a => a !== '--self-check');
+// `--self-check` runs ONE trivially-passing file instead of the suite, so every code
+// path the real run needs — selector probe, fenced spawn env, per-file constants, the
+// close handler, the completeness accounting — actually EXECUTES in a few seconds.
+//
+// WHY THIS EXISTS: a commit of mine deleted `TEST_TIMEOUT_MS`/`FILE_WALL_MS` while
+// leaving their uses. `node --check` passes (a missing binding is a RUNTIME
+// ReferenceError, verified), the count line still printed `994 files`, and the leg then
+// ran **0 of 994** — caught only by CI, on a green-looking headline. The failure lives
+// inside `runOne`, so nothing short of launching a child can see it.
+const selfCheck = process.argv.includes('--self-check');
 const hasOwnTimeout = extraArgs.some(a => a === '--timeout' || a.startsWith('--timeout='));
+
+// In self-check mode, run the guard for the selectors themselves: it is fast, has no
+// external dependencies, and asserts a real result — so "the runner works" and "the
+// selectors work" are established by the same few seconds.
+const SELF_CHECK_FILE = 'test/bun-runner-selectors.test.ts';
+if (selfCheck && !allRunnable.includes(SELF_CHECK_FILE)) {
+  console.error(
+    `Refusing to self-check: ${SELF_CHECK_FILE} is not in the runnable set. `
+    + 'Either it was deleted or the selectors now defer it — both mean the leg is unguarded.',
+  );
+  process.exit(1);
+}
+const runnable = selfCheck ? [SELF_CHECK_FILE] : allRunnable;
 // Keep concurrency moderate: many of these files spawn real daemons, ptys and
 // bwrap sandboxes, and oversubscribing turns their internal timeouts into
 // spurious reds (measured on a busy host). But do not starve a small runner
@@ -119,8 +222,11 @@ const concurrency = Number.isFinite(envConcurrency) && envConcurrency > 0
   : Math.max(4, Math.min(8, Math.floor(availableParallelism() / 4)));
 
 console.log(
-  `bun test: ${runnable.length} files, one process each, ${concurrency} at a time `
-  + `(${skipped.length} deferred to vitest — module-registry APIs)`,
+  selfCheck
+    ? `bun test SELF-CHECK: 1 of ${allRunnable.length} runnable files (${SELF_CHECK_FILE}) — `
+      + 'exercising the runner itself, NOT a suite result'
+    : `bun test: ${runnable.length} files, one process each, ${concurrency} at a time `
+      + `(${skipped.length} deferred to vitest — module-registry APIs)`,
 );
 
 // Every child currently running, mapped to the scratch dir minted for it, so a
@@ -353,6 +459,31 @@ if (incomplete) {
     console.error('  no worker crashed, yet files are missing — results cannot be trusted');
   }
   process.exit(1);
+}
+
+// The home invariant, checked BEFORE the green summary for the same reason as
+// completeness: a headline nobody can contradict is worse than a loud failure.
+//
+// Self-check only. A full run legitimately touches the real home in ways this script
+// does not control (bun's own resolution caches during `bun install`, a test that
+// deliberately writes there), so asserting it for every run would be a flake generator.
+// Self-check spawns exactly two bun processes, both fenced, and nothing else — an
+// entry appearing there means a fence went missing.
+if (selfCheck && homeBefore) {
+  const homeAfter = snapshotHome();
+  const added = homeAfter ? [...homeAfter].filter(e => !homeBefore.has(e)) : [];
+  if (added.length > 0) {
+    console.error(
+      `\nbun test SELF-CHECK FAILED: the run wrote into the real home (${process.env.HOME}): `
+      + `${added.join(', ')}`,
+    );
+    console.error(
+      '  Every `bun` this script spawns must get its env from mintFencedEnv() — Bun touches '
+      + 'its user-level caches before any preload runs, so only the spawn env can prevent this.',
+    );
+    process.exit(1);
+  }
+  console.log('bun test SELF-CHECK: real home untouched ✓');
 }
 
 console.log(`\nbun test: ${runnable.length - failures.length}/${runnable.length} files green, ${failures.length} failing`);

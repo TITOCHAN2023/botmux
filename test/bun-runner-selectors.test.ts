@@ -38,6 +38,11 @@ describe('bun leg selectors — files that must be deferred', () => {
     ['vi.hoisted', 'const v = vi.hoisted(() => 1);'],
     // vitest's globalSetup→test channel, which bun:test does not export.
     ['a named import of inject from vitest', "import { it, inject } from 'vitest';"],
+    ['inject from a vitest subpath', "import { inject } from 'vitest/suite';"],
+    // An alias still pulls the export that does not exist, so the file still dies.
+    ['inject imported under an alias', "import { inject as get } from 'vitest';"],
+    // A mixed clause: the type specifier is erased, the value one is not.
+    ['a value inject beside a type specifier', "import { type Mock, inject } from 'vitest';"],
   ])('defers: %s', (_label, source) => {
     expect(isDeferredFromBunLeg(source)).toBe(true);
   });
@@ -59,6 +64,21 @@ describe('bun leg selectors — files that must stay runnable', () => {
     ['the word inject in a test title', "it('does not inject anything', () => {});"],
     ['a script name containing inject', "const s = 'inject-optional-binaries.mjs';"],
     ['a callback parameter named inject', 'register((inject) => inject());'],
+    // Only vitest's `inject` is missing under bun. A same-named export from any other
+    // module resolves normally, so deferring it would silently shrink the leg — the
+    // exact failure this guard exists to catch. An import-clause-only pattern
+    // deferred all three of these.
+    ['inject from a local module', "import { inject } from './dependency-injection.js';"],
+    ['inject from a DI package', "import { injectable, inject } from 'tsyringe';"],
+    ['inject from a node builtin', "import { inject } from 'node:test';"],
+    // `vitest-` is a different package; the specifier must match on a boundary.
+    ['inject from a package merely prefixed vitest', "import { inject } from 'vitest-helpers';"],
+    // Type-only imports are ERASED before execution, so the module never has to supply
+    // the export. Verified under Bun 1.4: both forms run to completion even when
+    // `vitest` cannot be resolved at runtime at all.
+    ['a type-only import clause', "import type { inject } from 'vitest';"],
+    ['an inline type specifier', "import { type inject } from 'vitest';"],
+    ['type-only inject beside a value import', "import { type inject, describe } from 'vitest';"],
   ])('keeps runnable: %s', (_label, source) => {
     expect(isDeferredFromBunLeg(source)).toBe(false);
   });

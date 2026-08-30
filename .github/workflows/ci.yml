@@ -92,6 +92,16 @@ jobs:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: bun run build
+      # Exercise the runner itself before the 20-minute suite. `node --check` cannot
+      # catch a missing binding (a ReferenceError is a RUNTIME error, verified), so a
+      # commit that deleted two constants still printed `994 files` and then ran ZERO
+      # — the whole leg's cost with none of its value. This runs one file in ~6s and
+      # also asserts that no `bun` spawn escaped the home fence.
+      #
+      # NOT under continue-on-error semantics by accident: the job as a whole is
+      # advisory for now, but if this step fails the suite result below is meaningless,
+      # so it runs first and its failure is the one worth reading.
+      - run: bun run test:bun:self-check
       - run: bun run test:bun
 
   # The Bun single-file executable is a SHIPPED artifact (attached to every

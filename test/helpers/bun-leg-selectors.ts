@@ -33,16 +33,14 @@ const UNSUPPORTED_API = new RegExp(
 /**
  * `inject` is vitest's globalSetup→test channel and a NAMED EXPORT of `vitest`;
  * `bun test` resolves `vitest` to `bun:test`, which has no such export, so the file
- * dies at import. Anchored on the import — a bare `\binject\b` matched test titles,
- * script names and callback parameters.
+ * dies at import. Detected by PARSING the import declarations (below) rather than by
+ * a source-text pattern: a bare `\binject\b` matched test titles, script names and
+ * callback parameters, and an import-clause-only pattern deferred every named
+ * `inject` import regardless of the module it came from — measured: `import { inject }
+ * from './dependency-injection.js'`, `'tsyringe'` and `'node:test'` were all excluded.
+ * Only the `vitest` channel is unavailable under bun, so only it may defer a file.
  */
-// NOTE the specifier is matched loosely on purpose. `isDeferredFromBunLeg` blanks
-// string literals before matching (so a file can hold examples as data), which also
-// blanks `'vitest'` here — anchoring on the literal text would never fire. The
-// import CLAUSE is enough: a named `inject` binding from any module is the vitest
-// channel in practice, and the surrounding `import … from` shape keeps this from
-// matching an identifier that merely happens to be called `inject`.
-const IMPORTS_INJECT = /import\s*\{[^}]*\binject\b[^}]*\}\s*from\s*['"]?\s*/s;
+const VITEST_MODULE = /^vitest(\/|$)/;
 
 /**
  * A `vi.mock` factory that TAKES the original-module argument, in every syntactic
@@ -73,33 +71,84 @@ export function stripComments(source: string): string {
 }
 
 /**
+ * Load the TypeScript compiler, or throw.
+ *
+ * There is deliberately NO fallback to a regex-only path. That fallback existed and
+ * looked safe — "literals stay visible, so a file is at worst deferred, never wrongly
+ * promoted" — but a diff of both paths over all 1159 files showed it over-deferred
+ * exactly ONE file: `test/bun-runner-selectors.test.ts`, the guard for these very
+ * selectors, whose test inputs hold `importOriginal` / `inject` / parameterised
+ * `vi.mock` as DATA. So the degraded path silently excluded the one file that would
+ * have caught the degradation, and `loadDeferredSet` still exited 0.
+ *
+ * In a test-SELECTION context, over-deferring is not the safe side: it is a false-green
+ * channel. Missing dependency ⟹ no trustworthy selection ⟹ stop the run.
+ */
+function loadTypeScript(): typeof import('typescript') {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('typescript');
+  } catch (err) {
+    throw new Error(
+      'bun-leg-selectors requires the `typescript` devDependency to decide which files '
+      + 'the bun leg may run. Refusing to guess: a regex-only fallback silently deferred '
+      + `this module's own guard. Original error: ${(err as Error)?.message ?? err}`,
+    );
+  }
+}
+
+/**
+ * Every module specifier this source imports `binding` from AT RUNTIME.
+ *
+ * Text matching cannot do this job: `blankLiterals` blanks `'vitest'` along with every
+ * other literal, so a pattern anchored on the specifier could never fire, and dropping
+ * the anchor deferred any named `inject` import from any module.
+ *
+ * Type-only imports are EXCLUDED — both `import type { inject }` and the inline
+ * `import { type inject }` form. They are erased before execution, so the module never
+ * has to provide the export; verified under Bun 1.4, where both forms run to completion
+ * against a `vitest` that cannot even be resolved at runtime. Counting them would defer
+ * a file that runs perfectly well, which is the silent-shrink failure this module's
+ * guard exists to prevent.
+ */
+function importedModulesWithNamedBinding(source: string, binding: string): string[] {
+  const ts = loadTypeScript();
+  const sf = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const specifiers: string[] = [];
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    // `import type { … }` — the whole clause is erased.
+    if (stmt.importClause?.isTypeOnly) continue;
+    const named = stmt.importClause?.namedBindings;
+    if (!named || !ts.isNamedImports(named)) continue;
+    const hit = named.elements.some(el => {
+      // `import { type inject }` — this one specifier is erased, siblings are not.
+      if (el.isTypeOnly) return false;
+      // `import { inject as x }` still pulls the unavailable export, so match the
+      // PROPERTY name (what is imported) rather than the local alias.
+      return (el.propertyName ?? el.name).text === binding;
+    });
+    if (hit) specifiers.push(stmt.moduleSpecifier.text);
+  }
+  return specifiers;
+}
+
+/**
  * Blank out string and template literals, keeping the source's length and line
- * structure so the patterns below still see real code at real offsets.
+ * structure so the patterns still see real code at real offsets.
  *
  * WHY: the patterns are source-text matches, so a file that merely holds an example
  * IN A STRING looks identical to one that calls the API. That is not hypothetical —
  * the guard for these very selectors excluded ITSELF, because its table of test
- * inputs contains `vi.mock('./x.js', async (importOriginal) => …)` as data. Scanning
- * only real code is what lets a file describe the unsupported forms without being
- * deferred for it.
+ * inputs contains a parameterised `vi.mock` factory as data. Scanning only real code
+ * is what lets a file describe the unsupported forms without being deferred for it.
  *
  * Uses the TypeScript scanner rather than a regex: quotes nest, escape, and appear
  * inside template expressions, and a regex that tried to find "the end of a string"
  * would be wrong in exactly the cases that matter.
  */
 function blankLiterals(source: string): string {
-  // Imported lazily and defensively: this module is loaded by the runner through a
-  // one-line `bun -e` probe, and a missing devDependency must not take the leg down.
-  let ts: typeof import('typescript');
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    ts = require('typescript');
-  } catch {
-    // No scanner: fall back to the regex comment strip. Literals stay visible, so a
-    // file is at worst deferred — never wrongly promoted into the leg.
-    return stripComments(source);
-  }
-
+  const ts = loadTypeScript();
   const scanner = ts.createScanner(
     ts.ScriptTarget.Latest,
     /* skipTrivia */ false,
@@ -144,8 +193,11 @@ function blankLiterals(source: string): string {
 
 /** True when the bun leg cannot run this file and it must stay on vitest. */
 export function isDeferredFromBunLeg(source: string): boolean {
+  // Parsed, not text-matched: only `inject` FROM VITEST is unavailable under bun.
+  const injectsFromVitest = importedModulesWithNamedBinding(source, 'inject')
+    .some(spec => VITEST_MODULE.test(spec));
+  if (injectsFromVitest) return true;
+
   const code = blankLiterals(source);
-  return UNSUPPORTED_API.test(code)
-    || IMPORTS_INJECT.test(code)
-    || MOCK_FACTORY_TAKES_ORIGINAL.test(code);
+  return UNSUPPORTED_API.test(code) || MOCK_FACTORY_TAKES_ORIGINAL.test(code);
 }
