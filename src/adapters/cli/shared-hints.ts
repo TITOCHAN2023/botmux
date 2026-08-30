@@ -156,8 +156,10 @@ export function buildBotmuxSystemPromptText(opts: {
    *  request/response turn has no Feishu channel and no other bots to coordinate
    *  with, so those rules are noise, and `usage_silence` in particular CONFLICTS
    *  with the per-turn <botmux_http_response_mode> ("output only the final answer").
-   *  Only the prompt-injection defense survives (still relevant: untrusted event
-   *  data rides in the same prompt). The nothing-to-send sentinel semantics live
+   *  Inside <botmux_routing> only the prompt-injection defense survives (still
+   *  relevant: untrusted event data rides in the same prompt); <identity> keeps
+   *  its name/open_id and drops only its routing_rules. The nothing-to-send
+   *  sentinel semantics live
    *  SOLELY in <botmux_http_response_mode> now (see trigger-session.ts) — do NOT
    *  reintroduce a sentinel line here. Computed daemon-side as
    *  `!larkTransportEnabled({chatId, apiOnly})` and threaded through buildArgs. */
@@ -212,10 +214,9 @@ export function buildBotmuxSystemPromptText(opts: {
   // unaffected — the `- ` prefix lives only at this composition site.
   const [heredocRule, heredocExample] = multilineHeredocLines(locale).map(escapeXmlTagLikeTokens);
   // No-transport: collapse the routing block to just the hidden-context defense.
-  // The identity block (which for a no-transport bot is usually absent anyway,
-  // and whose routing_rules are @/collaboration semantics) is left as-is — a
-  // separate block, not the confirmed usage_silence conflict; gate it only if a
-  // follow-up shows it also misleads HTTP turns.
+  // The identity block's routing_rules carry the same @/collaboration semantics
+  // and are gated on the SAME flag — see identityBlock above, which keeps the
+  // harmless name/open_id and drops only the rules.
   const routingInner = noTransport
     ? [hiddenContextDefense(locale)]
     : [

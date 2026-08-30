@@ -948,7 +948,7 @@ export function ensureSessionWhiteboard(ds: DaemonSession): void {
   }
 }
 
-function renderWhiteboardBlock(opts?: { whiteboardId?: string }): string {
+function renderWhiteboardBlock(opts?: { whiteboardId?: string; noTransport?: boolean }): string {
   if (!whiteboardEnabled() || !opts?.whiteboardId) return '';
   const meta = getWhiteboard(opts.whiteboardId);
   if (!meta || meta.archived) return '';
@@ -959,7 +959,13 @@ function renderWhiteboardBlock(opts?: { whiteboardId?: string }): string {
     escapeXmlTagLikeTokens('更新状态：`botmux whiteboard update --id ' + id + ' --expected-updated-at <上次 read 的 updatedAt> <内容>`。'),
     '更新前先用 `read --json` 拿到当前内容与 updatedAt，融合新信息后整体重写为一份完整的当前状态（默认中文；代码标识/命令/错误信息可保留原文），并用 `--expected-updated-at` 回传 read 到的版本号做并发冲突检测。',
     '若更新报 `whiteboard_cas_mismatch`，说明期间有其它 agent 改过白板——重新 `read --json` 拿最新内容与 updatedAt，再次融合重写。',
-    '不要直接读写本地文件；不要写密钥/隐私；用户可见结论仍必须 `botmux send`。',
+    // no-transport（apiOnly bot / HTTP 虚拟会话）：末句的「仍必须 botmux send」是本 PR
+    // 要消除的那条矛盾指令的又一个出口——send 在这类会话里被 assertTurnTransportOrExit
+    // 硬拦（exit 2），而 <botmux_http_response_mode> 又明说不要 send。白板块在首轮与
+    // 续轮都无条件注入，所以这里必须同样 gate；隐私/本地文件两条与传输无关，保留。
+    opts.noTransport
+      ? '不要直接读写本地文件；不要写密钥/隐私。'
+      : '不要直接读写本地文件；不要写密钥/隐私；用户可见结论仍必须 `botmux send`。',
     '</whiteboard>',
   ].join('\n');
 }
@@ -1154,7 +1160,10 @@ export function buildNewTopicPrompt(
   }
 
   const roleBlock = renderRoleContextBlock(opts?.larkAppId, opts?.chatId);
-  const whiteboardBlock = renderWhiteboardBlock({ whiteboardId: opts?.whiteboardId });
+  const whiteboardBlock = renderWhiteboardBlock({
+    whiteboardId: opts?.whiteboardId,
+    noTransport: sessionIsNoTransport(opts?.larkAppId, opts?.chatId),
+  });
   const summaryMemoryBlock = renderSummaryMemoryBlock(opts?.larkAppId);
   const chatContextPolicyBlock = renderChatContextPolicyBlock(opts?.chatContext, locale);
   const chatContextBlock = renderChatContextBlock(opts?.chatContext);
@@ -1255,7 +1264,10 @@ export function buildNewTopicCliInput(
   // clean input when the caller also preserved their matching raw texts.
   if (cliId !== 'codex-app' || (followUps && followUps.length > 0 && !opts?.codexAppFollowUps)) return { content };
   const roleBlock = renderRoleContextBlock(opts?.larkAppId, opts?.chatId);
-  const whiteboardBlock = renderWhiteboardBlock({ whiteboardId: opts?.whiteboardId });
+  const whiteboardBlock = renderWhiteboardBlock({
+    whiteboardId: opts?.whiteboardId,
+    noTransport: sessionIsNoTransport(opts?.larkAppId, opts?.chatId),
+  });
   const summaryMemoryBlock = renderSummaryMemoryBlock(opts?.larkAppId);
   const senderBlock = renderSenderTag(sender, opts?.larkAppId);
   const substitutePolicyBlock = renderSubstitutePolicy(opts?.substituteTrigger);
@@ -1332,7 +1344,10 @@ function buildFollowUpBlocks(
 ): Array<{ key: FollowUpBlockKey; text: string }> {
   const blocks: Array<{ key: FollowUpBlockKey; text: string }> = [];
   const roleBlock = renderRoleContextBlock(opts?.larkAppId, opts?.chatId, { followUp: true });
-  const whiteboardBlock = renderWhiteboardBlock({ whiteboardId: opts?.whiteboardId });
+  const whiteboardBlock = renderWhiteboardBlock({
+    whiteboardId: opts?.whiteboardId,
+    noTransport: sessionIsNoTransport(opts?.larkAppId, opts?.chatId),
+  });
   const summaryMemoryBlock = renderSummaryMemoryBlock(opts?.larkAppId);
   const skipSessionId = opts?.isAdoptMode || (opts?.cliId
     ? createCliAdapterSync(opts.cliId, opts.cliPathOverride).injectsSessionContext
@@ -1527,7 +1542,10 @@ export function buildFollowUpCliInput(
   const legacyContent = buildFollowUpContent(content, sessionId, opts);
   if (opts?.cliId !== 'codex-app' || opts.isAdoptMode) return { content: legacyContent };
   const roleBlock = renderRoleContextBlock(opts.larkAppId, opts.chatId, { followUp: true });
-  const whiteboardBlock = renderWhiteboardBlock({ whiteboardId: opts.whiteboardId });
+  const whiteboardBlock = renderWhiteboardBlock({
+    whiteboardId: opts.whiteboardId,
+    noTransport: sessionIsNoTransport(opts.larkAppId, opts.chatId),
+  });
   const summaryMemoryBlock = renderSummaryMemoryBlock(opts.larkAppId);
   const senderBlock = renderSenderTag(opts.sender, opts.larkAppId);
   const substitutePolicyBlock = renderSubstitutePolicy(opts.substituteTrigger);
