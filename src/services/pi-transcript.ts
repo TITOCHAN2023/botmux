@@ -280,6 +280,11 @@ interface PiPendingTurnState {
     errorMessage?: string;
     heldSinceMs?: number;
   };
+  /** Sticky: set once ANY turn-boundary marker is seen on this transcript.
+   *  Proves the boundary extension is live for this session, after which the
+   *  marker — not a user record — owns the release decision. See the
+   *  `role === 'user'` branch for why that matters (steer). */
+  markerSeen?: boolean;
 }
 
 const piPendingTurnCache = new Map<string, PiPendingTurnState>();
@@ -413,6 +418,16 @@ export function drainPiTranscript(
     // way; anything else means Pi recovered and the held error is dropped.
     const boundary = piTurnBoundaryStopReason(obj);
     if (boundary.present) {
+      // One marker proves the extension is live here; from now on the marker
+      // (or the backstop) resolves holds, never a bare user record. Set before
+      // the branch below so the session_start announcement counts too.
+      const firstMarker = !pending.markerSeen;
+      pending.markerSeen = true;
+      // The session_start announcement carries no verdict (`lastStopReason:
+      // null` on the very first marker) — it must NOT be read as "this turn
+      // settled cleanly", or it would silently drop a held error. Only a
+      // marker that actually closes a turn resolves the hold.
+      if (firstMarker && boundary.lastStopReason === undefined) continue;
       if (boundary.lastStopReason === PI_TURN_BOUNDARY_STOP_REASON_ERROR) {
         events.push(...flushHeldPiError(pending, sessionId));
       } else {
@@ -429,19 +444,35 @@ export function drainPiTranscript(
     if (role === 'user') {
       const content = joinTextContent(obj.message.content);
       if (!content) continue;
-      // A new user record is a turn boundary in its own right: whatever was
-      // still held belonged to the PREVIOUS turn, and that turn's last word was
-      // an error — so it really did fail and must be reported before this
-      // turn's events. Without this, a failed turn the user simply retyped
-      // after would be silently swallowed when the NEXT turn's terminal
-      // cleared the hold. Measured on real transcripts: 104 error records are
-      // immediately followed by a new user record.
+      // A user record can mean two very different things, and only one of them
+      // ends the held error's turn:
       //
-      // Steered input (Pi's Message Queue pulls a mid-turn submit into the
-      // SAME turn) writes its user record at DEQUEUE time — after the tool
-      // result that unblocked it, never between an error and its retry — so
-      // this cannot mistake a steer for a turn boundary.
-      events.push(...flushHeldPiError(pending, sessionId));
+      //   • A genuinely NEW turn — the previous turn's last word was an error,
+      //     so it really did fail and must be reported before this turn's
+      //     events. Without this the failure is swallowed when the NEXT turn's
+      //     terminal clears the hold. Measured on real transcripts: 104 error
+      //     records are immediately followed by a new user record.
+      //   • A STEER — input submitted while the turn was still running. Pi's
+      //     retry entry point re-reads the steering queue at the TOP of the
+      //     loop ("Check for steering messages at start", agent-loop.ts), so a
+      //     message that lands during the retry backoff (2s/4s/8s, up to 14s
+      //     per turn) writes its user record BETWEEN the error and its retry.
+      //     Flushing there posts a failure card for a turn that then succeeds —
+      //     exactly the false alarm this whole mechanism removes.
+      //
+      // We cannot tell them apart from the user record alone. But we do not
+      // have to: when the boundary extension is loaded the marker resolves
+      // every held error on its own, so this release is pure downside there —
+      // it can only mis-fire on a steer. It earns its keep ONLY on transcripts
+      // that will never produce a marker (adopt sessions, a compiled binary,
+      // sessions predating the extension), where it is the sole timely signal
+      // and the alternative is waiting out the 300s backstop.
+      //
+      // `markerSeen` is sticky per transcript: one marker proves the extension
+      // is live for this session, and from then on the boundary owns the
+      // decision. Before the first marker we keep releasing, so a
+      // marker-less session still reports its failures promptly.
+      if (!pending.markerSeen) events.push(...flushHeldPiError(pending, sessionId));
       events.push({
         uuid: `${path}:${lineStart}`,
         timestampMs,

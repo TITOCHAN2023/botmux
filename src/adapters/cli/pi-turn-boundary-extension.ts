@@ -55,6 +55,7 @@ export interface PiTurnBoundaryEntryData {
 }
 
 interface PiTurnBoundaryExtensionApi {
+  on(event: 'session_start', handler: (event: unknown) => void): void;
   on(event: 'agent_end', handler: (event: unknown) => void): void;
   on(event: 'agent_settled', handler: (event: unknown) => void): void;
   appendEntry(customType: string, data?: unknown): void;
@@ -76,6 +77,20 @@ export function lastAssistantStopReason(event: unknown): string | undefined {
 }
 
 export default function registerBotmuxTurnBoundaryExtension(pi: PiTurnBoundaryExtensionApi): void {
+  // Announce presence before any turn can run. The reader uses the first
+  // marker as proof that boundaries are coming, and until it sees one it must
+  // fall back to weaker heuristics (releasing a held error on the next user
+  // record). Without this announcement the session's FIRST turn has no such
+  // proof, so a steer landing in that turn's retry backoff would be misread as
+  // a new turn. `lastStopReason: null` carries no verdict — it only says
+  // "the extension is live here".
+  pi.on('session_start', () => {
+    try {
+      const data: PiTurnBoundaryEntryData = { lastStopReason: null };
+      pi.appendEntry(PI_TURN_BOUNDARY_CUSTOM_TYPE, data);
+    } catch { /* see the agent_settled handler */ }
+  });
+
   // Tracks the most recent agent run. Pi emits one `agent_end` per ATTEMPT
   // (retries included) and a single `agent_settled` once the turn is really
   // over, so the value standing at settle time is the outcome that decides

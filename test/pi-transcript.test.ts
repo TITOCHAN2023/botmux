@@ -333,6 +333,68 @@ describe('drainPiTranscript: turn terminal contract', () => {
     expect(fails[0].terminalErrorCode).toBe('codex_upstream_error');
   });
 
+  // ── Steer during retry backoff (found in review) ──────────────────────────
+  //
+  // Pi's retry entry re-reads the steering queue at the TOP of the loop
+  // ("Check for steering messages at start", agent-loop.ts), so input that
+  // lands during the 2s/4s/8s backoff writes its user record BETWEEN the error
+  // and its retry. Releasing a held error there posts a failure card for a turn
+  // that then succeeds — the exact false alarm this mechanism exists to remove.
+  // Botmux runs Pi with supportsTypeAhead, so this is a live path.
+
+  it('does not report a failure when a steer lands between an error and its retry', () => {
+    const path = writeTranscript([
+      sessionHeader(),
+      turnSettled(null, '2026-08-03T05:13:30.000Z'),   // session_start announce
+      userMsg('原始问题'),
+      assistantFinal('error', '', '2026-08-03T05:14:01.000Z', 'upstream stream error: service unavailable'),
+      userMsg('补一句（steer，落在 backoff 期间）', '2026-08-03T05:14:03.000Z'),
+      assistantFinal('stop', 'ANSWER', '2026-08-03T05:14:06.000Z'),
+      turnSettled('stop'),
+    ]);
+    const events = drainAll(path);
+    const finals = events.filter((e) => e.kind === 'assistant_final');
+    expect(finals).toHaveLength(1);
+    expect(finals[0].text).toBe('ANSWER');
+    expect(events.filter((e) => e.terminalStatus === 'failed')).toHaveLength(0);
+  });
+
+  it('still reports a first-turn failure even though the announce marker carries no verdict', () => {
+    // The session_start announcement uses lastStopReason:null purely to say
+    // "the extension is live". It must never be mistaken for "this turn ended
+    // cleanly", or a held error would be silently dropped.
+    const path = writeTranscript([
+      sessionHeader(),
+      userMsg('原始问题'),
+      assistantFinal('error', '', '2026-08-03T05:14:01.000Z', 'upstream stream error: service unavailable'),
+      turnSettled(null, '2026-08-03T05:14:02.000Z'),   // announce arrives late
+      turnSettled('error', '2026-08-03T05:14:03.000Z'),
+    ]);
+    const fails = drainAll(path).filter((e) => e.terminalStatus === 'failed');
+    expect(fails).toHaveLength(1);
+    expect(fails[0].terminalErrorCode).toBe('codex_upstream_error');
+  });
+
+  it('without any marker, a failed turn the user simply retyped after is still reported', () => {
+    // Marker-less transcripts (adopt, compiled binary, sessions predating the
+    // extension) have no boundary to resolve the hold, and the NEXT turn's
+    // terminal would clear it — so the user record must still release. Measured
+    // on real transcripts: 104 error records are immediately followed by a new
+    // user record. Gating this on a marker silently swallowed 109 of 120 real
+    // failures when first attempted.
+    const path = writeTranscript([
+      sessionHeader(),
+      userMsg('第一个问题'),
+      assistantFinal('error', '', '2026-08-03T05:14:01.000Z', 'upstream stream error: service unavailable'),
+      userMsg('（放弃，重新问）', '2026-08-03T05:20:00.000Z'),
+      assistantFinal('stop', 'ANSWER', '2026-08-03T05:20:10.000Z'),
+    ]);
+    const events = drainAll(path);
+    const fails = events.filter((e) => e.terminalStatus === 'failed');
+    expect(fails).toHaveLength(1);
+    expect(events.some((e) => e.text === 'ANSWER')).toBe(true);
+  });
+
   it('emits assistant_final on stopReason:length as a completed (truncated) answer', () => {
     const path = writeTranscript([
       sessionHeader(),
