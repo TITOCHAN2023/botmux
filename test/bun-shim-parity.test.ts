@@ -336,6 +336,39 @@ describe('exact-path env overrides are cleared by the shared fence', () => {
   });
 });
 
+// `toHaveBeenCalledExactlyOnceWith` is shimmed under bun (vitest has it natively).
+// Its meaning is a CONJUNCTION — called exactly once, AND with these arguments — so
+// the guard has to cover the failing quadrants too: a shim that only compared
+// arguments would pass for a mock called three times whose first call matched, and
+// one that only counted calls would pass for a single wrong-argument call. The
+// repository's two production users only exercise the passing case, so without these
+// the count check could be deleted and CI would stay green.
+describe('toHaveBeenCalledExactlyOnceWith parity', () => {
+  it('passes when called exactly once with those arguments', () => {
+    const fn = vi.fn();
+    fn('a', 1);
+    expect(fn).toHaveBeenCalledExactlyOnceWith('a', 1);
+  });
+
+  it('FAILS when called twice, even though the first call matches', () => {
+    const fn = vi.fn();
+    fn('a', 1);
+    fn('a', 1);
+    expect(() => expect(fn).toHaveBeenCalledExactlyOnceWith('a', 1)).toThrow();
+  });
+
+  it('FAILS when called once with different arguments', () => {
+    const fn = vi.fn();
+    fn('b', 2);
+    expect(() => expect(fn).toHaveBeenCalledExactlyOnceWith('a', 1)).toThrow();
+  });
+
+  it('FAILS when never called at all', () => {
+    const fn = vi.fn();
+    expect(() => expect(fn).toHaveBeenCalledExactlyOnceWith('a', 1)).toThrow();
+  });
+});
+
 // `it.runIf(cond)` must behave exactly like `skipIf(!cond)`: Bun ships skipIf but
 // not runIf, and the shim inverts it. Asserting the ran/skipped split (rather
 // than just "did not crash") is what makes the equivalence testable.

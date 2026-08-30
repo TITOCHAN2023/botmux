@@ -62,93 +62,43 @@ function collectTestFiles(dir) {
   return found;
 }
 
-// Matches the APIs whose absence is a module-system gap rather than a missing
-// helper. Keep in sync with the "DELIBERATELY NOT SHIMMED" list in
-// test/bun-test-shim.ts.
+// The exclusion selectors live in test/helpers/bun-leg-selectors.ts so that a guard
+// can import and exercise the REAL logic (test/bun-runner-selectors.test.ts) instead
+// of a hand-copied duplicate that drifts. They are loaded through Bun because this
+// script runs under Node, which cannot import TypeScript directly.
 //
-// `importOriginal` / `importActual` also appear as the CALLBACK PARAMETER of a
-// `vi.mock` factory (`vi.mock('x', async (importActual) => …)`), which is the
-// same module-registry feature under a different spelling — matching the bare
-// identifier catches both that and any `vi.importActual(…)` call site. Anchoring
-// only on `vi.<name>` would miss the callback form entirely (measured: 2 files).
-//
-// `vi.hoisted` belongs here for the same class of reason: vitest's TRANSFORM
-// physically moves the callback above the static imports, so a fixture that reads
-// a global at import time sees what the callback set. A runtime shim can only run
-// the factory when the module body reaches it — i.e. AFTER the imports — so the
-// fixture sees nothing (measured: vitest passes that probe while an eager-factory
-// shim reports `missing`). That is module-evaluation ORDER, not a missing
-// function, so it is unsupported rather than faked.
-// `inject` is vitest's globalSetup→test value channel (`project.provide` /
-// `inject`). It is a NAMED EXPORT of the `vitest` module, and `bun test` resolves
-// `vitest` to its own `bun:test` — which has no such export, so the file dies at
-// import with `SyntaxError: Export named 'inject' not found`. A preload cannot
-// paper over it: `mock.module('vitest', … inject: … )` still fails, because the
-// static import is validated against `bun:test`'s real export list before any
-// mock applies (measured). Runner-config plumbing, not a missing helper.
-const UNSUPPORTED = /\bvi\s*\.\s*(doMock|doUnmock|resetModules|hoisted)\b|\bimportOriginal\b|\bimportActual\b/;
-
-// `inject` needs its OWN, anchored pattern. Adding a bare `\binject\b` to the
-// list above looks equivalent but silently deferred 20 innocent files — measured:
-// of the 21 files it newly excluded, exactly ONE actually imports `inject`; the
-// rest merely contain the English word in a test title ("does not inject …"), a
-// script name (`inject-optional-binaries.mjs`), a callback parameter, or a domain
-// term (`inject-queue-policy`). Same failure shape as the comment-matching bug
-// this file already guards against — and the population count looks perfectly
-// healthy while it happens. So match the thing that actually breaks: a NAMED
-// IMPORT of `inject` from `vitest` (the specifier list may span lines and carry
-// other names alongside it).
-const IMPORTS_INJECT = /import\s*\{[^}]*\binject\b[^}]*\}\s*from\s*['"]vitest['"]/s;
-
-// The `vi.mock` factory's original-module callback is matched by SHAPE, not by
-// name. `importOriginal` and `importActual` are only conventions: one file in this
-// repo calls the parameter `orig`, and a name-based pattern sailed straight past it
-// — the file then failed in CI with `orig is not a function`, because Bun never
-// supplies that argument at all. Any single-parameter `vi.mock` factory is relying
-// on the same unsupported feature, whatever the parameter is called.
-//
-// A zero-parameter factory (`vi.mock('x', () => ({ … }))`) is the supported form and
-// must NOT match, so the parameter list has to be non-empty.
-const MOCK_FACTORY_TAKES_ORIGINAL =
-  /\bvi\s*\.\s*mock\s*\([^,]+,\s*(?:async\s*)?\(\s*[A-Za-z_$][\w$]*/;
-
-// Comments must not decide whether a file runs. Matching raw source means a file
-// that merely MENTIONS one of these names in prose gets silently skipped, and the
-// count line still looks healthy — the same shape of miss as the non-recursive
-// scan above. This is not hypothetical: the parity guard in
-// test/bun-shim-parity.test.ts excluded ITSELF that way while explaining why the
-// hoisting helper is unsupported. Strip comments before testing.
-//
-// Deliberately simple: this is a skip-list heuristic over first-party test files,
-// not a parser. `//` inside a string literal would over-strip, which fails
-// CLOSED — the file stays in the leg and any real unsupported call there fails
-// loudly rather than being quietly dropped.
-function stripComments(source) {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+// Why a subprocess rather than a loader: this script is the thing that launches bun,
+// so it is already a hard dependency, and shelling out keeps the runner free of a
+// TS-transform requirement of its own.
+function loadDeferredSet(files) {
+  const probe = [
+    "const { isDeferredFromBunLeg } = await import('./test/helpers/bun-leg-selectors.ts');",
+    "const { readFileSync } = await import('node:fs');",
+    'const out = [];',
+    'for (const f of JSON.parse(process.argv[1] ?? "[]")) {',
+    '  if (isDeferredFromBunLeg(readFileSync(f, "utf8"))) out.push(f);',
+    '}',
+    'process.stdout.write(JSON.stringify(out));',
+  ].join('\n');
+  const res = spawnSync('bun', ['-e', probe, JSON.stringify(files)], { encoding: 'utf8' });
+  if (res.status !== 0 || res.error) {
+    console.error('Failed to evaluate the bun-leg selectors:');
+    console.error(res.stderr || res.error?.message || `exit ${res.status}`);
+    process.exit(1);
+  }
+  try {
+    return new Set(JSON.parse(res.stdout));
+  } catch {
+    console.error(`Selector probe returned unparseable output: ${res.stdout.slice(0, 200)}`);
+    process.exit(1);
+  }
 }
-
-// Bun's per-test default is 5s, but the unit project runs at vitest's 30s and
-// individual files raise it further via `vi.setConfig({ testTimeout })` — up to
-// 180s for the mojo suites. `bun test` has no runtime equivalent for that
-// per-file call (the shim accepts it as a no-op), so the ceiling comes from the
-// CLI. A generous timeout cannot turn a failing test green; it only stops a slow
-// one from being cut short.
-const TEST_TIMEOUT_MS = 180_000;
-// Hard wall per file, above the per-test ceiling: a file that wedges (waiting on
-// a pty, a lock, a socket) must not hold the whole leg open.
-const FILE_WALL_MS = 240_000;
 
 const all = collectTestFiles(TEST_DIR).sort();
 
-const runnable = [];
-const skipped = [];
-for (const file of all) {
-  const source = stripComments(readFileSync(file, 'utf8'));
-  if (UNSUPPORTED.test(source) || IMPORTS_INJECT.test(source) || MOCK_FACTORY_TAKES_ORIGINAL.test(source)) skipped.push(file);
-  else runnable.push(file);
-}
+const deferred = loadDeferredSet(all);
+const runnable = all.filter(f => !deferred.has(f));
+const skipped = all.filter(f => deferred.has(f));
 
 if (runnable.length === 0) {
   console.error('Refusing to report success: no runnable files were found. Is the test/ directory present?');

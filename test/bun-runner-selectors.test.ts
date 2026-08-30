@@ -1,73 +1,104 @@
 import { describe, expect, it } from 'vitest';
 
+import { isDeferredFromBunLeg, stripComments } from './helpers/bun-leg-selectors.js';
+
 /**
- * Guards the source-text selectors in `scripts/run-bun-tests.mjs` that decide which
- * files the bun leg may run.
+ * Guards the selectors that decide which files the `bun test` leg may run.
  *
- * WHY: a selector that is too narrow SILENTLY SKIPS files (the population count
- * still looks healthy — this repo has already shipped that bug three times: a
- * comment-matching over-exclusion, a bare `\binject\b` that deferred 20 innocent
- * files, and a name-based mock-factory pattern that missed a callback spelled
- * `orig`). One that is too broad quietly drops files that would otherwise run. Both
- * failure modes are invisible in the summary line, so the selectors need their own
- * two-sided guard.
+ * WHY THIS EXISTS: both directions of error are invisible in the runner's summary
+ * line. Too narrow and files are SILENTLY SKIPPED while the population count still
+ * looks healthy; too broad and files that would pass quietly sit out. This repo has
+ * shipped that bug three times — a comment match, a bare `\binject\b` that deferred
+ * 20 innocent files, and a name-based factory pattern that missed a callback spelled
+ * `orig` — so the selectors need a two-sided guard of their own.
  *
- * Kept as literal copies of the runner's regexes rather than imported: the runner is
- * a plain `.mjs` script with top-level `await` and side effects at import time, so
- * importing it here would execute a test run. The `keeps this in sync` case below is
- * what catches drift between the two copies.
+ * It imports the REAL selector rather than re-declaring the patterns. An earlier
+ * version copied them, which had two problems: the copy could drift, and the copied
+ * literals made this very file match its own exclusion rule — so it was deferred out
+ * of the leg it is supposed to guard, and only ever ran when invoked by hand. Passing
+ * sources in as arguments keeps every example inside a parameter, where a scan of the
+ * repository cannot see it.
  */
 
-const UNSUPPORTED = /\bvi\s*\.\s*(doMock|doUnmock|resetModules|hoisted)\b|\bimportOriginal\b|\bimportActual\b/;
-const IMPORTS_INJECT = /import\s*\{[^}]*\binject\b[^}]*\}\s*from\s*['"]vitest['"]/s;
-const MOCK_FACTORY_TAKES_ORIGINAL =
-  /\bvi\s*\.\s*mock\s*\([^,]+,\s*(?:async\s*)?\(\s*[A-Za-z_$][\w$]*/;
-
-function excluded(source: string): boolean {
-  return UNSUPPORTED.test(source) || IMPORTS_INJECT.test(source)
-    || MOCK_FACTORY_TAKES_ORIGINAL.test(source);
-}
-
-describe('bun runner exclusion selectors', () => {
+describe('bun leg selectors — files that must be deferred', () => {
   it.each([
-    // The feature is defined by SHAPE — a factory that takes the original-module
-    // argument — not by what the parameter happens to be called.
-    ['vi.mock factory taking the original under the conventional name', "vi.mock('./x.js', async (importOriginal) => ({}));"],
-    ['…under a non-conventional name (the case that leaked to CI)', "vi.mock('./x.js', async (orig) => ({}));"],
-    ['…without async', "vi.mock('./x.js', (importOriginal) => ({}));"],
-    ['vi.doMock at all', "vi.doMock('./x.js', () => ({}));"],
-    ['vi.resetModules at all', 'vi.resetModules();'],
-    ['vi.hoisted at all', 'const v = vi.hoisted(() => 1);'],
+    // The feature is defined by SHAPE — a factory that receives the original module —
+    // not by what the parameter is called. All four syntactic forms must match.
+    ['parenthesised arrow, conventional name', "vi.mock('./x.js', async (importOriginal) => ({}));"],
+    ['parenthesised arrow, other name', "vi.mock('./x.js', async (orig) => ({}));"],
+    ['parenless arrow (escaped a parens-only pattern)', "vi.mock('./x.js', async importOriginal => ({}));"],
+    ['parenless arrow, other name', "vi.mock('./x.js', orig => ({}));"],
+    ['function expression', "vi.mock('./x.js', function (orig) { return {}; });"],
+    ['async function expression', "vi.mock('./x.js', async function (orig) { return {}; });"],
+    ['no async keyword', "vi.mock('./x.js', (importOriginal) => ({}));"],
+    // Module-registry / transform APIs, by name.
+    ['vi.doMock', "vi.doMock('./x.js', () => ({}));"],
+    ['vi.doUnmock', "vi.doUnmock('./x.js');"],
+    ['vi.resetModules', 'vi.resetModules();'],
+    ['vi.hoisted', 'const v = vi.hoisted(() => 1);'],
+    // vitest's globalSetup→test channel, which bun:test does not export.
     ['a named import of inject from vitest', "import { it, inject } from 'vitest';"],
-  ])('excludes: %s', (_label, source) => {
-    expect(excluded(source)).toBe(true);
+  ])('defers: %s', (_label, source) => {
+    expect(isDeferredFromBunLeg(source)).toBe(true);
   });
+});
 
+describe('bun leg selectors — files that must stay runnable', () => {
   it.each([
-    // The supported form: a factory that does NOT ask for the original module.
-    ['zero-argument mock factory', "vi.mock('./x.js', () => ({ a: 1 }));"],
+    // The supported form: a factory that does not ask for the original module.
+    ['zero-argument factory', "vi.mock('./x.js', () => ({ a: 1 }));"],
     ['zero-argument async factory', "vi.mock('./x.js', async () => ({ a: 1 }));"],
+    ['zero-argument function expression', "vi.mock('./x.js', function () { return {}; });"],
     ['bare vi.mock with no factory', "vi.mock('./x.js');"],
     // Ordinary callbacks must not be mistaken for a mock factory.
     ['an unrelated callback after a vi.mock', "vi.mock('./x.js');\narr.map((item) => item + 1);"],
     ['vi.fn with a parameter', 'const f = vi.fn((a) => a);'],
     ['spyOn mockImplementation', "vi.spyOn(o, 'm').mockImplementation((x) => x);"],
     ['mockImplementation after a bare vi.mock', "vi.mock('./x.js');\nthing.mockImplementation((v) => v);"],
-    // Prose must never decide whether a file runs.
+    // Prose and identifiers must never decide whether a file runs.
     ['the word inject in a test title', "it('does not inject anything', () => {});"],
     ['a script name containing inject', "const s = 'inject-optional-binaries.mjs';"],
+    ['a callback parameter named inject', 'register((inject) => inject());'],
   ])('keeps runnable: %s', (_label, source) => {
-    expect(excluded(source)).toBe(false);
+    expect(isDeferredFromBunLeg(source)).toBe(false);
   });
 
-  it('keeps this file in sync with the runner script', async () => {
+  it('sees code that follows a template literal with a substitution', () => {
+    // Regression: scanning a `${…}` substitution needs `reScanTemplateToken`, or the
+    // `}` reads as a plain brace and the next backtick opens a NEW literal that
+    // swallows the rest of the file. That blanked real calls and wrongly promoted
+    // files into the leg — the defect is invisible unless the probe puts a template
+    // BEFORE the thing being detected.
+    const source = [
+      'const p = (id: string) => join(DIR, `token-${id}.json`);',
+      "vi.mock('node:fs', async (importOriginal) => ({}));",
+    ].join('\n');
+    expect(isDeferredFromBunLeg(source)).toBe(true);
+  });
+
+  it('still sees code after a plain template literal', () => {
+    const source = ["const s = `no substitution`;", 'vi.resetModules();'].join('\n');
+    expect(isDeferredFromBunLeg(source)).toBe(true);
+  });
+
+  it('ignores an unsupported API named only inside a comment', () => {
+    expect(isDeferredFromBunLeg('// this file once used vi.resetModules\nit("x", () => {});')).toBe(false);
+    expect(isDeferredFromBunLeg('/* vi.hoisted was removed */\nit("x", () => {});')).toBe(false);
+  });
+
+  it('strips comments but leaves code intact', () => {
+    expect(stripComments('const a = 1; // trailing\nconst b = 2;')).toContain('const b = 2;');
+    expect(stripComments('/* lead */ const c = 3;')).toContain('const c = 3;');
+    // A URL must survive: the `//` there is not a comment.
+    expect(stripComments("const u = 'https://example.com/x';")).toContain('https://example.com/x');
+  });
+});
+
+describe('bun leg selectors — this guard runs inside the leg it guards', () => {
+  it('is not deferred by its own rules', async () => {
     const { readFileSync } = await import('node:fs');
-    const runner = readFileSync('scripts/run-bun-tests.mjs', 'utf8');
-    // If the runner's regexes are edited without updating the copies above, this
-    // fails — which is the point. Compare source text, not behaviour, so a changed
-    // pattern is caught even when both happen to agree on today's corpus.
-    for (const re of [UNSUPPORTED, IMPORTS_INJECT, MOCK_FACTORY_TAKES_ORIGINAL]) {
-      expect(runner).toContain(re.source);
-    }
+    // The earlier copy-the-patterns version excluded itself, so it never ran in CI.
+    // Every example above lives in a function argument for exactly this reason.
+    expect(isDeferredFromBunLeg(readFileSync('test/bun-runner-selectors.test.ts', 'utf8'))).toBe(false);
   });
 });
