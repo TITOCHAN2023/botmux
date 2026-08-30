@@ -16,6 +16,16 @@ import { vi } from 'vitest';
  * `test/bun-test-fence.ts` overrides `node:os` itself; the shim alone would not
  * make an unfenced run safe.
  *
+ * KNOWN BUN DEFECTS that cannot be shimmed from here (documented so the resulting
+ * red is legible rather than mysterious):
+ *   `expect(promise).resolves.toSatisfy(fn)` — Bun calls the predicate with `{}`
+ *     instead of the resolved value. Measured: the SYNC form
+ *     `expect([1,2]).toSatisfy(fn)` receives the array correctly, so the defect is
+ *     in the `resolves` chain, not in `toSatisfy`. One file relies on it
+ *     (`test/remote-shutdown-detach.test.ts`, which fails with
+ *     `results.every is not a function`). Overriding a matcher cannot fix how the
+ *     runner threads the awaited value into it.
+ *
  * DELIBERATELY NOT SHIMMED — these are module-system semantics, not missing
  * functions, and any fake would silently not-mock while reporting success:
  *   `vi.doMock` / `vi.doUnmock`  — re-point a module mid-file
