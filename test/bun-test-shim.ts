@@ -154,6 +154,43 @@ fill('setConfig', (config?: Record<string, unknown>) => {
 // wrong. Without it, 16 `it.runIf` + 5 `describe.runIf` files fail at collection
 // time with `it.runIf is not a function` (the whole mojo-* cluster).
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// `expect(fn).toHaveBeenCalledExactlyOnceWith(...)` — vitest has it, Bun does not
+// (measured). Its meaning is the conjunction of two matchers Bun DOES have, so this
+// is a mechanical composition rather than a reimplementation: called exactly once,
+// AND that one call had these arguments. Asserting both halves is what keeps it
+// honest — a shim that only checked arguments would pass for a mock called three
+// times whose first call matched.
+// ---------------------------------------------------------------------------
+const expectWithExtend = expect as unknown as {
+  extend?: (matchers: Record<string, unknown>) => void;
+};
+if (typeof expectWithExtend.extend === 'function') {
+  expectWithExtend.extend({
+    toHaveBeenCalledExactlyOnceWith(received: unknown, ...expected: unknown[]) {
+      const mock = (received as { mock?: { calls?: unknown[][] } })?.mock;
+      if (!mock || !Array.isArray(mock.calls)) {
+        return { pass: false, message: () => 'expected a mock function' };
+      }
+      const calls = mock.calls;
+      if (calls.length !== 1) {
+        return { pass: false, message: () => `expected exactly 1 call, received ${calls.length}` };
+      }
+      // Reuse the runner's own deep equality so the comparison semantics match
+      // `toHaveBeenCalledWith` instead of inventing a second notion of equality.
+      try {
+        expect(calls[0]).toEqual(expected);
+        return { pass: true, message: () => 'called exactly once with the expected arguments' };
+      } catch {
+        return {
+          pass: false,
+          message: () => `called once, but with ${JSON.stringify(calls[0])} instead of ${JSON.stringify(expected)}`,
+        };
+      }
+    },
+  });
+}
+
 /**
  * `it.sequential` / `describe.sequential` — vitest's opt-out of concurrent
  * execution. `bun test` already runs tests sequentially by default (measured: an
