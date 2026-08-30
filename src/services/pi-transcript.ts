@@ -421,13 +421,13 @@ export function drainPiTranscript(
       // One marker proves the extension is live here; from now on the marker
       // (or the backstop) resolves holds, never a bare user record. Set before
       // the branch below so the session_start announcement counts too.
-      const firstMarker = !pending.markerSeen;
       pending.markerSeen = true;
-      // The session_start announcement carries no verdict (`lastStopReason:
-      // null` on the very first marker) — it must NOT be read as "this turn
-      // settled cleanly", or it would silently drop a held error. Only a
-      // marker that actually closes a turn resolves the hold.
-      if (firstMarker && boundary.lastStopReason === undefined) continue;
+      // A declaration marker (`lastStopReason: null`, written on session_start
+      // — including EVERY resume, which re-fires session_start) carries no
+      // verdict. It must NEVER be read as "this turn settled cleanly", or a
+      // second declaration after a mid-turn crash would silently drop a held
+      // error. Only a marker that actually closes a turn resolves the hold.
+      if (boundary.lastStopReason === undefined) continue;
       if (boundary.lastStopReason === PI_TURN_BOUNDARY_STOP_REASON_ERROR) {
         events.push(...flushHeldPiError(pending, sessionId));
       } else {
