@@ -100,6 +100,18 @@ const UNSUPPORTED = /\bvi\s*\.\s*(doMock|doUnmock|resetModules|hoisted)\b|\bimpo
 // other names alongside it).
 const IMPORTS_INJECT = /import\s*\{[^}]*\binject\b[^}]*\}\s*from\s*['"]vitest['"]/s;
 
+// The `vi.mock` factory's original-module callback is matched by SHAPE, not by
+// name. `importOriginal` and `importActual` are only conventions: one file in this
+// repo calls the parameter `orig`, and a name-based pattern sailed straight past it
+// — the file then failed in CI with `orig is not a function`, because Bun never
+// supplies that argument at all. Any single-parameter `vi.mock` factory is relying
+// on the same unsupported feature, whatever the parameter is called.
+//
+// A zero-parameter factory (`vi.mock('x', () => ({ … }))`) is the supported form and
+// must NOT match, so the parameter list has to be non-empty.
+const MOCK_FACTORY_TAKES_ORIGINAL =
+  /\bvi\s*\.\s*mock\s*\([^,]+,\s*(?:async\s*)?\(\s*[A-Za-z_$][\w$]*/;
+
 // Comments must not decide whether a file runs. Matching raw source means a file
 // that merely MENTIONS one of these names in prose gets silently skipped, and the
 // count line still looks healthy — the same shape of miss as the non-recursive
@@ -134,7 +146,7 @@ const runnable = [];
 const skipped = [];
 for (const file of all) {
   const source = stripComments(readFileSync(file, 'utf8'));
-  if (UNSUPPORTED.test(source) || IMPORTS_INJECT.test(source)) skipped.push(file);
+  if (UNSUPPORTED.test(source) || IMPORTS_INJECT.test(source) || MOCK_FACTORY_TAKES_ORIGINAL.test(source)) skipped.push(file);
   else runnable.push(file);
 }
 
