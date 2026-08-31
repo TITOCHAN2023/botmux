@@ -751,9 +751,16 @@ export function isHttpVirtualSession(chatId: string | undefined | null): boolean
  * reply / card / roster seam should fail-closed on `!larkTransportEnabled(...)`
  * instead of re-deriving the condition, so a new no-Feishu surface is covered
  * everywhere by construction. `doc:` sessions keep their own dedicated routing
- * (comment API), so they are intentionally NOT folded in here. */
+ * (comment API), so they are intentionally NOT folded in here.
+ *
+ * `chatId` is REQUIRED-but-nullable on purpose: a caller holding an optional
+ * chatId may pass `undefined`/`null` (tolerated — see isHttpVirtualSession),
+ * but OMITTING the key entirely stays a compile error. This is a fail-closed
+ * gate, and a forgotten `chatId` would land on the permissive side (an
+ * apiOnly-less object would read as "transport enabled"), so the missing-key
+ * case must not typecheck. Do not relax to `chatId?:`. */
 export function larkTransportEnabled(
-  ds: { chatId?: string | null; apiOnly?: boolean },
+  ds: { chatId: string | null | undefined; apiOnly?: boolean },
 ): boolean {
   if (ds.apiOnly === true) return false;
   if (isHttpVirtualSession(ds.chatId)) return false;
