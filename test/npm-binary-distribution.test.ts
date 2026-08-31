@@ -53,6 +53,66 @@ describe('package.json — lockfile safety and packaging', () => {
     }
   });
 
+  /**
+   * THE PUBLISHED TARBALL MUST NOT CARRY THE NODE FORM.
+   *
+   * #1047 removed the Node fallback by deleting `bin` and demoting node-pty to a
+   * devDependency — but `files` still shipped `dist/` (4221 files, 48 MB unpacked)
+   * plus an `ecosystem.config.cjs` whose `script` is `dist/index-daemon.js`. That
+   * left a complete, executable, `#!/usr/bin/env node`-shebanged CLI in the tarball
+   * whose module graph imports a package the manifest does not depend on.
+   *
+   * MEASURED on the real published botmux@3.18.8 — extracted, deps installed the way
+   * a global install does (`--omit=dev`, so node-pty is absent):
+   *   node dist/index-daemon.js
+   *   → Fatal error: ERR_MODULE_NOT_FOUND: Cannot find package 'node-pty'
+   *     imported from .../dist/adapters/backend/tmux-backend.js
+   * which is verbatim the error users reported on 3.18.7/3.18.8. The compiled
+   * binary in the platform subpackage embeds pty.node and is unaffected; only this
+   * shipped-but-unrunnable second copy of the CLI can produce it.
+   *
+   * ⚠️ ASSERTED AGAINST REAL `npm pack` OUTPUT, not against the `files` array.
+   * `files` is an input to a globbing/ignore-file algorithm, not the artifact: a
+   * modelled reading of it can be green while the tarball differs. So this asks npm
+   * itself what it would publish.
+   */
+  it('the PUBLISHED tarball ships no runnable Node form (the node-pty crash users hit)', () => {
+    const packed = spawnSync('npm', ['pack', '--dry-run', '--json'], {
+      encoding: 'utf-8',
+      cwd: resolve('.'),
+      timeout: 120_000,
+    });
+    // Never let an npm hiccup pass as "no dist/ in the tarball" — that is the
+    // vacuous-green direction for a test whose whole job is an absence claim.
+    expect(packed.error, `npm pack failed to run: ${packed.error?.message}`).toBeUndefined();
+    expect(packed.status, `npm pack exited ${packed.status}: ${packed.stderr}`).toBe(0);
+    const paths: string[] = JSON.parse(packed.stdout)[0].files.map((f: { path: string }) => f.path);
+    // Proof the probe saw a real file list, so the absence assertions below have
+    // something to be absent FROM.
+    expect(paths).toContain('package.json');
+    expect(paths).toContain('scripts/postinstall-bin.mjs');
+
+    // No second CLI. These three are the entry points a stale `exec node <path>`
+    // launcher, a systemd unit, or a hand-run `pm2 start` would land on.
+    for (const entry of ['dist/cli.js', 'dist/index-daemon.js', 'dist/worker.js']) {
+      expect(paths, `${entry} must not ship: it imports node-pty, which is not a dependency`).not.toContain(entry);
+    }
+    expect(paths.filter(p => p.startsWith('dist/'))).toEqual([]);
+    // The pm2 ecosystem file names dist/index-daemon.js as its `script`. Nothing in
+    // the source tree reads it (the supervisor replaced pm2), so its only remaining
+    // effect is telling a human to start the broken form by hand.
+    expect(paths).not.toContain('ecosystem.config.cjs');
+  });
+
+  it('declares no entry point that the tarball does not contain', () => {
+    // `main`/`bin` pointing into a dist/ that no longer ships would be a manifest
+    // that lies about itself: `require('botmux')` would resolve and then fail on a
+    // missing file. The package is a CLI delivered as a compiled binary, so it has
+    // no library entry point at all.
+    expect(manifest.bin).toBeUndefined();
+    expect(manifest.main).toBeUndefined();
+  });
+
   it('ships the postinstall script in `files` (otherwise npm i -g fails hard)', () => {
     expect(manifest.scripts.postinstall).toBe('node scripts/postinstall-bin.mjs');
     // Verified by packing+installing a probe: a missing postinstall target is not
@@ -164,7 +224,8 @@ describe('postinstall-bin — writes the launcher ONLY for a real global install
     sourceCheckout?: boolean;
     /** Omit scripts/install-path-entry.mjs, to prove the import is fail-soft. */
     withoutPathHelper?: boolean;
-    /** Pretend binDir is already on PATH, so the PATH-writing branch is skipped. */
+    /** Pretend binDir is already on the INSTALLING process's PATH. Note this must
+     *  NOT suppress the startup-file write — see the test that pins it. */
     binDirOnPath?: boolean;
     /** $SHELL for the child, which decides WHICH startup file gets the PATH line. */
     shell?: string;
@@ -180,9 +241,13 @@ describe('postinstall-bin — writes the launcher ONLY for a real global install
     pkgRelPath?: string;
     /** Ship dist/utils/global-install.js, which guard 1's location check imports. */
     withDistPredicate?: boolean;
+    /** Run against an EXISTING home from a previous call, the way an upgrade does.
+     *  Needed to exercise idempotence across two installs (the startup file has to
+     *  survive between them, which a fresh tmp home cannot show). */
+    reuseHome?: string;
   }) {
     const base = tmp();
-    const home = join(base, 'home');
+    const home = opts.reuseHome ?? join(base, 'home');
     const pkg = join(base, opts.pkgRelPath ?? 'pkg');
     mkdirSync(home, { recursive: true });
     mkdirSync(join(pkg, 'scripts'), { recursive: true });
@@ -287,13 +352,71 @@ describe('postinstall-bin — writes the launcher ONLY for a real global install
     expect(`${r.stdout}${r.stderr}`).toContain('PATH');
   });
 
-  it('touches no startup file when binDir is already on PATH', () => {
-    // An upgrade on a machine that was set up long ago must not keep appending
-    // to (or even creating) rc files it has nothing to add to.
+  /**
+   * WRITES THE STARTUP FILE EVEN WHEN binDir IS ALREADY ON THE INSTALLING SHELL'S
+   * PATH — this replaces a test that asserted the opposite and thereby pinned a bug.
+   *
+   * The old contract ("touches no startup file when binDir is already on PATH") was
+   * reasoned from upgrade noise: "an upgrade on a machine set up long ago must not
+   * keep appending to rc files". The goal is right; the SIGNAL was wrong. It gated
+   * on `process.env.PATH`, i.e. the PATH of the process running the install, while
+   * what actually decides whether `botmux` works is whether the user's FUTURE shells
+   * get it — a property of the startup FILE.
+   *
+   * Those come apart, and botmux itself pulls them apart: the daemon prepends
+   * `~/.botmux/bin` to every CLI session's PATH (five `prependBotmuxBin` call sites
+   * in worker.ts / worker-pool.ts). So `npm i -g botmux` run from inside a botmux
+   * session hit the gate, wrote NOTHING, printed NOTHING, exited 0 — and since there
+   * is no `bin` field to fall back on, the user's next terminal had no `botmux` at
+   * all. That is the reported "3.18.8 更新之后找不到 botmux 命令", still reproducing
+   * after `exec zsh -l` because the file the login shell reads was never written.
+   *
+   * Idempotence is still required — it is just enforced where the real answer lives:
+   * `ensurePathEntry` consults `fileAlreadyHasEntry` per file (which also recognises
+   * a line the user wrote by hand) and reports those as `skipped`. The next test
+   * pins that, so "does not append twice" survives without the wrong gate.
+   */
+  it('writes the startup file even when the INSTALLING shell already has binDir on PATH', () => {
     const r = runPostinstall({ global: 'true', shell: '/usr/bin/zsh', binDirOnPath: true });
     expect(r.status).toBe(0);
     expect(r.wrote).toBe(true);                        // launcher still written
-    expect(existsSync(join(r.home, '.zshenv'))).toBe(false);
+    // The whole point: a transiently-correct PATH must not suppress the file that
+    // makes it permanent.
+    const zshenv = join(r.home, '.zshenv');
+    expect(existsSync(zshenv), 'binDir on the installer PATH must not suppress the startup file').toBe(true);
+    expect(readFileSync(zshenv, 'utf-8')).toContain(join(r.home, '.botmux', 'bin'));
+    // And the user is told, so they know to open a new terminal.
+    expect(r.stdout).toContain('open a new terminal');
+  });
+
+  it('does not append twice when the startup file already carries the entry', () => {
+    // The idempotence the old PATH gate was reaching for, asserted on the signal
+    // that actually governs it. Two installs in the SAME home: the second must
+    // report `skipped` and leave exactly one marker line.
+    const first = runPostinstall({ global: 'true', shell: '/usr/bin/zsh' });
+    expect(first.status).toBe(0);
+    const zshenv = join(first.home, '.zshenv');
+    expect(existsSync(zshenv)).toBe(true);
+    const markers = (text: string) => text.split('\n').filter(l => l.includes('# added by botmux installer')).length;
+    expect(markers(readFileSync(zshenv, 'utf-8'))).toBe(1);
+
+    // Re-run against the very same HOME (reuseHome), as an upgrade would.
+    const second = runPostinstall({ global: 'true', shell: '/usr/bin/zsh', reuseHome: first.home });
+    expect(second.status).toBe(0);
+    expect(markers(readFileSync(zshenv, 'utf-8')), 'a re-install must not append a second PATH line').toBe(1);
+    expect(second.stdout).toContain('already puts');
+  });
+
+  it('SOURCE PIN: the PATH step is not gated on the installing process\'s own PATH', () => {
+    // Behavioural coverage above needs the fixture to stage binDir on PATH; this
+    // pins the absence of the wrong predicate directly, so a re-add is caught even
+    // if someone reshapes the fixture. `process.env.PATH` may legitimately appear
+    // elsewhere in the file (it is passed through to the probe spawn), so match the
+    // specific gate shape that caused the bug: a membership test of binDir in it.
+    const src = readFileSync(POSTINSTALL, 'utf-8');
+    const code = src.split('\n').filter(l => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n');
+    expect(code).not.toMatch(/process\.env\.PATH[^\n]*\.includes\(\s*binDir\s*\)/);
+    expect(code).not.toMatch(/if\s*\(\s*!\s*\(?\s*process\.env\.PATH/);
   });
 
   it('the written launcher actually runs and preserves argument boundaries', () => {
@@ -402,6 +525,12 @@ describe('postinstall-bin — writes the launcher ONLY for a real global install
     // Removing the runtime deps while leaving `bin` wired is the worst combination:
     // the fallback still resolves and then dies on `require('node-pty')`. Pin the
     // absence so a well-meaning re-add is caught here.
+    //
+    // ⚠️ `bin` was never the only way in. The tarball also shipped `dist/` itself,
+    // so a stale `exec node "<root>/dist/cli.js"` launcher left behind by a
+    // pre-#1047 install reached the same unrunnable CLI with no `bin` involved —
+    // that is the crash users hit on 3.18.7/3.18.8. `dist/` is out of `files` now
+    // (asserted against real `npm pack` output above); keep BOTH pins.
     const manifest = JSON.parse(readFileSync(resolve(import.meta.dirname, '../package.json'), 'utf-8')) as {
       bin?: unknown;
       dependencies?: Record<string, string>;
