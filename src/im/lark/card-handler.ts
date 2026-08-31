@@ -90,7 +90,8 @@ import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
 import { resumeStartsFresh } from '../../services/resume-fresh-policy.js';
-import { forkWorker, sendWorkerInput, sendWorkerSessionInput, killWorker, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, buildStreamingCardJson, silentIdleCardFlag, type WorkerSessionReplyOptions } from '../../core/worker-pool.js';
+import { cliHasNoRawPassthroughSurface } from '../../core/passthrough-commands.js';
+import { forkWorker, sendWorkerInput, sendWorkerSessionInput, killWorker, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, buildStreamingCardJson, silentIdleCardFlag, dshRuntimeForSession, type WorkerSessionReplyOptions } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { markInitialUserTurnPending } from '../../core/initial-user-turn.js';
 import { publishAttentionPatch, publishClosedSessionPatch, announcePendingRepoSession } from '../../core/session-activity.js';
@@ -316,6 +317,7 @@ function getSessionByActionValue(
 function sessionCliId(ds: DaemonSession) {
   return ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
 }
+
 
 /** A session's configured distribution name is frozen with its launch config.
  * Never borrow today's bot runtime for an already-frozen legacy/official
@@ -2873,6 +2875,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(sessionCliId(ds), ds.codexServiceTier),
           silentIdleCardFlag(ds),
+          dshRuntimeForSession(ds),
         );
         scheduleCardPatch(ds, cardJson);
       }
@@ -3270,6 +3273,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
               sessionRuntimeDisplayName(ds),
               codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
               silentIdleCardFlag(ds),
+              dshRuntimeForSession(ds),
             );
             updateMessage(ds.larkAppId, cardMessageId, cardJson).catch(err =>
               logger.debug(`[${tag(ds)}] Failed to migrate unknown frozen card: ${err}`),
@@ -3317,6 +3321,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionRuntimeDisplayName(ds),
           effectiveCliId === 'codex' ? frozen.codexServiceTierBadge : undefined,
           frozen.silentIdle === true,
+          dshRuntimeForSession(ds),
         );
         updateMessage(ds.larkAppId, frozen.messageId, cardJson).catch(err =>
           logger.debug(`[${tag(ds)}] Failed to migrate frozen card: ${err}`),
@@ -3362,6 +3367,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
           silentIdleCardFlag(ds),
+          dshRuntimeForSession(ds),
         );
         if (cardMessageId && cardMessageId !== ds.streamCardId) {
           updateMessage(ds.larkAppId, cardMessageId, cardJson).catch(err =>
@@ -3432,6 +3438,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
           silentIdleCardFlag(ds),
+          dshRuntimeForSession(ds),
         );
         if (cardMessageId && cardMessageId !== ds.streamCardId) {
           updateMessage(ds.larkAppId, cardMessageId, cardJson).catch(err =>
@@ -3494,6 +3501,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
           silentIdleCardFlag(ds),
+          dshRuntimeForSession(ds),
         );
         return {
           toast: { type: 'success', content: t('card.action.stop_sent', { cliName: sessionCliDisplayName(ds) }, locDs) },
@@ -3518,6 +3526,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       }
       if (!ds.worker || ds.worker.killed) {
         return { toast: { type: 'warning', content: t('card.action.compact_no_worker', undefined, locDs) } };
+      }
+      // Defense-in-depth: the router already refuses raw passthrough for CLIs with
+      // no raw input surface (resolvePassthroughCommands returns an empty set), but
+      // this button path previously had NO cliId gate at all — which is exactly how a
+      // builder-side gate that hand-wrote a single cliId let mira/mir/dsh/ebsd grow a
+      // button whose /compact gets dropped as non-frame input or, worse, delivered to
+      // the model as an ordinary user message. Refuse here too, so the button path can
+      // never reopen a channel the router deliberately closed.
+      if (cliHasNoRawPassthroughSurface(sessionCliId(ds), { dshRuntime: getBot(ds.larkAppId).config.dshRuntime })) {
+        return { toast: { type: 'warning', content: t('card.action.compact_unsupported', undefined, locDs) } };
       }
       if (!deps.deliverPassthroughCommand) {
         return { toast: { type: 'warning', content: t('card.action.compact_unsupported', undefined, locDs) } };
@@ -3575,6 +3593,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           sessionRuntimeDisplayName(ds),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
           silentIdleCardFlag(ds),
+          dshRuntimeForSession(ds),
         );
         try { return JSON.parse(cardJson); } catch { /* fall through */ }
       }

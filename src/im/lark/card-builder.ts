@@ -1,4 +1,5 @@
 import { isRemoteCliId } from '../../core/remote-cli-ids.js';
+import { cliHasNoRawPassthroughSurface } from '../../core/passthrough-commands.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import type { CliId, ResumableSession } from '../../adapters/cli/types.js';
 import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
@@ -7,7 +8,7 @@ import type { CodexAppThreadSummary } from '../../services/codex-app-threads.js'
 import type { DisplayMode, StreamStatus } from '../../types.js';
 import type { CliUsageLimitState } from '../../utils/cli-usage-limit.js';
 import { t, type Locale } from '../../i18n/index.js';
-import { cardUsageFooterSegment, cardUsageRuntimeSegment, type CardUsageSnapshot } from './md-card.js';
+import { cardUsageFooterSegment, cardUsageRuntimeSegment, contextOverCompactThreshold, type CardUsageSnapshot } from './md-card.js';
 import { readGlobalConfig } from '../../global-config.js';
 import type { ConfigCardData } from '../../services/bot-config-store.js';
 import { isLocalCliOpenEnabled } from '../../services/local-cli-opener.js';
@@ -913,9 +914,11 @@ function pushStreamBody(
     const runtimeSeg = usage ? cardUsageRuntimeSegment(usage, true) : null;
     const line = runtimeSeg ? `${usageSeg} · ${runtimeSeg}` : usageSeg;
     // 上下文吃紧时整行转红（而不是另起一行报警）：提示就在用量数字旁边，一眼可见，
-    // 且不多占卡片高度。判据是 usageSeg 里是否已带「建议压缩」——由
-    // cardUsageFooterSegment 按 contextCompactThreshold() 决定，此处不重复算阈值。
-    const overThreshold = usageSeg.includes(t('card.context.compact_hint', undefined, locale));
+    // 且不多占卡片高度。判据与 footer 里追加「建议压缩」的**是同一个谓词**——刻意不去
+    // 嗅 usageSeg 里有没有那串提示文案：那份文案是可被用户自定义覆盖的（覆盖成空串时
+    // `includes('')` 恒真 ⟹ 每张卡都会变红），且把颜色行为耦合到文案上会让「改个翻译」
+    // 静默改掉配色。
+    const overThreshold = !!usage && contextOverCompactThreshold(usage, contextCompactThreshold());
     elements.push({
       tag: 'markdown',
       text_size: 'notation_small_v2',
@@ -956,6 +959,14 @@ export function buildStreamingCard(
   runtimeDisplayName?: string,
   serviceTierBadge?: string,
   silentIdle?: boolean,
+  /** Live per-bot `dshRuntime`. Only meaningful for cliId 'dsh': 'tui' means the
+   *  worker spawns the PTY-driven dsh-tui adapter (a real interactive TUI that
+   *  accepts a raw /compact), so the compact button must stay visible. Omitted ⇒
+   *  fail-closed to the headless JSON-RPC runner, which matches this card's
+   *  pre-existing behaviour for dsh (no transcript ⇒ the old percentage gate
+   *  never showed the button either), so a call site that forgets to pass it
+   *  degrades to the status quo rather than to a broken button. */
+  dshRuntime?: 'official' | 'tui',
 ): string {
   const effectiveCliId = cliId ?? 'claude-code';
   const cliName = runtimeDisplayName?.trim() || getCliDisplayName(effectiveCliId);
@@ -1032,11 +1043,17 @@ export function buildStreamingCard(
   // 上下文窗口字段（只有 model），于是 Claude 会话永远看不到压缩按钮——而 Claude 恰好
   // 是最需要 /compact 的一家。百分比是「快满了吗」的提示，与「能不能压缩」无关，用它当
   // 闸门是拿错了判据。
-  // 判据与「停止」按钮一致：remote CLI（riff/mojo）无本地终端可驱动、codex-app（App
-  // Runner）无 PTY 输入通道，两者点了也只会被 handler 拒；其余 CLI 一律显示（/compact
-  // 是全局 best-effort 透传，CLI 认得就生效、认不得顶多回一句 unknown command）。
-  // handler 侧的真实前置是「worker 活着 + passthrough 已接线」，不含百分比。
-  if (!isRemoteCliId(cliId) && effectiveCliId !== 'codex-app') {
+  //
+  // 判据必须**调谓词**（cliHasNoRawPassthroughSurface），不能手写单个 cliId 字面量：
+  //   ① remote CLI（riff/mojo）无本地终端可驱动；
+  //   ② 无 raw passthrough 面的 CLI（codex-app/mira/mir/dsh/ebsd）——/compact 走 raw_input
+  //      把字面量写进 PTY，绕过 runner 的 `::botmux-<id>:<base64>` 帧协议：dsh 打
+  //      `ignoring non-frame input` 静默丢弃，mira/mir 把 `/compact` 当**普通用户消息**
+  //      发给模型白烧一个 turn。打字发 /compact 本就被 router 的
+  //      resolvePassthroughCommands 对这些 CLI 返回空集拦住，按钮不能把那条路重新打开。
+  // dsh 是运行时相关的：dshRuntime='tui' 跑的是 PTY 驱动的 dsh-tui（真交互 TUI），照常显示。
+  // handler 侧另有一道同谓词的拒绝兜底（compact_session），两层都不依赖百分比。
+  if (!isRemoteCliId(cliId) && !cliHasNoRawPassthroughSurface(effectiveCliId, { dshRuntime })) {
     headerActions.push({
       tag: 'button',
       text: { tag: 'plain_text', content: t('card.btn.compact', undefined, locale) },

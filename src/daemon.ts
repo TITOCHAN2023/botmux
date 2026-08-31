@@ -208,6 +208,7 @@ import {
   migrateMojoSessionIdentities,
   mojoLivePatchForSession,
   silentIdleCardFlag,
+  dshRuntimeForSession,
   recordTurnExplicitMention,
 } from './core/worker-pool.js';
 import { waitAllWithin, trackProducerQuiet, trackProcessExited } from './core/producer-quiescence.js';
@@ -4685,6 +4686,7 @@ function beginNewTurn(ds: DaemonSession, title: string, turnId: string): void {
       // A silently-closed previous turn freezes with its honest label
       // (「已处理 · 判定无需回复」), not a misleading 「等待输入」.
       silentIdleCardFlag(ds),
+      dshRuntimeForSession(ds),
     );
     scheduleCardPatch(ds, frozenCard);
 

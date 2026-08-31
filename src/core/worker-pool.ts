@@ -869,6 +869,7 @@ function scheduleLocalCliOpenReadinessPatch(ds: DaemonSession): void {
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson);
 }
@@ -923,6 +924,7 @@ function scheduleActiveRuntimePatch(ds: DaemonSession): void {
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson);
 }
@@ -1037,6 +1039,7 @@ function scheduleCodexServiceTierPatch(ds: DaemonSession): void {
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson);
 }
@@ -1116,6 +1119,7 @@ export function refreshStreamingCardUsage(ds: DaemonSession): void {
     // ⚡ badge until the next status-edge PATCH.
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson);
 }
@@ -1199,6 +1203,7 @@ export function scheduleRiffAccessUrlPatch(ds: DaemonSession): void {
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson);
 }
@@ -1217,6 +1222,20 @@ function clearPendingLocalCliOpenReadinessPatch(ds: DaemonSession): void {
 
 function tag(ds: DaemonSession): string {
   return ds.session.sessionId.substring(0, 8);
+}
+
+/** Live per-bot `dshRuntime` for a session's card. Only meaningful for cliId
+ *  'dsh': 'tui' means the worker spawns the PTY-driven dsh-tui adapter (a real
+ *  interactive TUI), so `/compact` affordances stay enabled. Read from the LIVE
+ *  bot config on purpose — `SessionCliLaunchSnapshotV1` has no dshRuntime field
+ *  and the worker likewise pairs a frozen cliId with the live runtime, so this
+ *  matches what actually spawns. */
+export function dshRuntimeForSession(ds: DaemonSession): 'official' | 'tui' | undefined {
+  try {
+    return getBot(ds.larkAppId).config.dshRuntime;
+  } catch {
+    return undefined;
+  }
 }
 
 function sessionCliId(ds: DaemonSession, botCfg: { cliId: CliId }): CliId {
@@ -1840,6 +1859,7 @@ function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
     sessionRuntimeDisplayName(ds, bot.config),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson);
 }
@@ -2092,6 +2112,7 @@ function reconcilePostedStartingCard(ds: DaemonSession, turnId: string | undefin
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   scheduleCardPatch(ds, cardJson, turnId);
 }
@@ -2157,6 +2178,7 @@ export async function postTurnStartingCard(
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
 
   ds.streamCardNonce = nonce;
@@ -2287,6 +2309,7 @@ export async function postFreshStreamingCard(
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
   ds.streamCardId = CARD_POSTING_SENTINEL;
   try {
@@ -5406,6 +5429,7 @@ export function buildStreamingCardJson(ds: DaemonSession, status?: StreamStatus)
     sessionRuntimeDisplayName(ds, botCfg),
     codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
     silentIdleCardFlag(ds),
+    dshRuntimeForSession(ds),
   );
 }
 
@@ -10566,6 +10590,7 @@ function setupWorkerHandlers(
               sessionRuntimeDisplayName(ds, botCfg),
               codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
               silentIdleCardFlag(ds),
+              dshRuntimeForSession(ds),
             );
             await updateMessage(ds.larkAppId, restoredCardId, streamCardJson);
             if (!ownsLifecycleMutation()) break;
@@ -10647,6 +10672,7 @@ function setupWorkerHandlers(
             sessionRuntimeDisplayName(ds, botCfg),
             codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
             silentIdleCardFlag(ds),
+            dshRuntimeForSession(ds),
           );
           const postedCardId = await scopedReply(
             streamCardJson, 'interactive', cardReplyTarget.turnId,
@@ -11122,6 +11148,7 @@ function setupWorkerHandlers(
             sessionRuntimeDisplayName(ds, botCfg),
             codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
             silentIdleCardFlag(ds),
+            dshRuntimeForSession(ds),
           );
           // Mark POST in-flight so subsequent screen_updates are dropped,
           // not POSTed as duplicate cards.
@@ -11205,6 +11232,7 @@ function setupWorkerHandlers(
             sessionRuntimeDisplayName(ds, botCfg),
             codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
             silentIdleCardFlag(ds),
+            dshRuntimeForSession(ds),
           );
           scheduleCardPatch(ds, cardJson, msg.turnId);
           // Keep the live usage climbing during a long working phase; stop once
@@ -11280,6 +11308,7 @@ function setupWorkerHandlers(
           sessionRuntimeDisplayName(ds, botCfg),
           codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
           silentIdleCardFlag(ds),
+          dshRuntimeForSession(ds),
         );
         scheduleCardPatch(ds, cardJson);
         break;
@@ -11690,6 +11719,7 @@ function setupWorkerHandlers(
               sessionRuntimeDisplayName(ds, botCfg),
               codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
               silentIdleCardFlag(ds),
+              dshRuntimeForSession(ds),
             );
             scheduleCardPatch(ds, frozenCard);
           }
@@ -11762,6 +11792,7 @@ function setupWorkerHandlers(
               sessionRuntimeDisplayName(ds, botCfg),
               codexServiceTierBadge(effectiveCliId, ds.codexServiceTier),
               silentIdleCardFlag(ds),
+              dshRuntimeForSession(ds),
             );
             scheduleCardPatch(ds, frozenCard);
           }

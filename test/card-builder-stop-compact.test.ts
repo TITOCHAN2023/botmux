@@ -15,6 +15,9 @@ import {
   contextCompactThreshold,
   DEFAULT_CONTEXT_COMPACT_THRESHOLD,
 } from '../src/im/lark/card-builder.js';
+import { ALL_CLI_IDS } from '../src/adapters/cli/registry.js';
+import { cliHasNoRawPassthroughSurface } from '../src/core/passthrough-commands.js';
+import { setPromptOverrideResolver } from '../src/i18n/index.js';
 import {
   globalConfigPath,
   mergeDashboardConfig,
@@ -61,6 +64,7 @@ function build(opts: {
   displayMode?: string;
   usage?: any;
   locale?: string;
+  dshRuntime?: 'official' | 'tui';
 } = {}): any {
   return parse(buildStreamingCard(
     SID,
@@ -80,6 +84,10 @@ function build(opts: {
     undefined,
     false,
     opts.usage,
+    undefined,
+    undefined,
+    undefined,
+    opts.dshRuntime,
   ));
 }
 
@@ -165,6 +173,59 @@ describe('buildStreamingCard: compact button (compact_session)', () => {
       expect(findButton(headerActions(card), 'compact_session'), `cliId=${cliId}`).toBeFalsy();
     }
   });
+
+  // ── 闸门必须调谓词，不能手写 cliId 字面量 ────────────────────────────────
+  // /compact 走 raw_input 把**字面量**写进 PTY，绕过 runner 的
+  // `::botmux-<id>:<base64>` 帧协议：dsh 打 `ignoring non-frame input` 静默丢弃，
+  // mira/mir 把 `/compact` 当**普通用户消息**发给模型白烧一个 turn。打字发 /compact
+  // 本就被 router（resolvePassthroughCommands 对这些 CLI 返回空集）拦住，按钮不得把
+  // 那条路重新打开。
+  //
+  // ⭐ 这条**枚举 ALL_CLI_IDS 全集**而不是列举几个已知成员：本缺陷的成因正是
+  // 「手写了名单里的 1 个、漏掉其余 4 个」，只测已知成员的用例对"下一个新增的
+  // 无 raw 面 CLI"没有区分力。把判据钉在谓词上，新增 CLI 会自动被覆盖。
+  it('never renders for ANY cli whose passthrough surface the predicate refuses (whole registry)', () => {
+    const offenders: string[] = [];
+    for (const cliId of ALL_CLI_IDS) {
+      // dsh 是运行时相关的：不传 dshRuntime ⇒ 谓词按 headless runner 判（fail-closed）。
+      if (!cliHasNoRawPassthroughSurface(cliId)) continue;
+      const card = build({ status: 'working', cliId, usage: { context: { percentUsed: 45 } } });
+      if (findButton(headerActions(card), 'compact_session')) offenders.push(cliId);
+    }
+    expect(offenders).toEqual([]);
+    // 反向哨兵：谓词至少真的拒绝了一批 CLI，否则上面的循环体一次都没跑（空断言假绿）。
+    expect(ALL_CLI_IDS.filter(c => cliHasNoRawPassthroughSurface(c)).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('is hidden for the runner CLIs specifically (mira/mir/dsh/ebsd — /compact would be dropped or sent as a user message)', () => {
+    for (const cliId of ['mira', 'mir', 'dsh', 'ebsd']) {
+      const card = build({ status: 'working', cliId, usage: { context: { percentUsed: 45 } } });
+      expect(findButton(headerActions(card), 'compact_session'), `cliId=${cliId}`).toBeFalsy();
+    }
+  });
+
+  // dsh-tui 是 PTY 驱动的交互式 TUI（与 claude-code 同款交互模型），raw /compact 有效。
+  // 它**不靠 cliId 选中**：bot 配 cliId='dsh' + dshRuntime='tui'，worker 内部才解析成
+  // dsh-tui，所以卡片侧只能靠 dshRuntime 区分。
+  it('DOES render for a dsh bot running the interactive TUI (dshRuntime=tui)', () => {
+    const card = build({ status: 'working', cliId: 'dsh', dshRuntime: 'tui' });
+    expect(findButton(headerActions(card), 'compact_session')).toBeTruthy();
+  });
+
+  it('stays hidden for a dsh bot on the headless runner (dshRuntime=official)', () => {
+    const card = build({ status: 'working', cliId: 'dsh', dshRuntime: 'official' });
+    expect(findButton(headerActions(card), 'compact_session')).toBeFalsy();
+  });
+
+  it('fails CLOSED for dsh when dshRuntime is not threaded through (missing arg ⇒ status quo, not a broken button)', () => {
+    const card = build({ status: 'working', cliId: 'dsh' });
+    expect(findButton(headerActions(card), 'compact_session')).toBeFalsy();
+  });
+
+  it('does not let dshRuntime leak into an unrelated runner CLI', () => {
+    const card = build({ status: 'working', cliId: 'mir', dshRuntime: 'tui' });
+    expect(findButton(headerActions(card), 'compact_session')).toBeFalsy();
+  });
 });
 
 describe('buildStreamingCard: context headroom lives ONLY in the usage footer', () => {
@@ -249,6 +310,56 @@ describe('buildStreamingCard: context headroom lives ONLY in the usage footer', 
     // 没有百分比 ⟹ 阈值判断天然不触发，不会误报「建议压缩」。
     expect(footer.content).not.toContain('建议压缩');
     expect(footer.content).toContain("color='grey'");
+  });
+
+  // ── 颜色判据不得从「渲染后的文案」反推 ───────────────────────────────────
+  // 提示文案（card.context.compact_hint）是**可被用户覆盖**的 copy。曾经的实现用
+  // `usageSeg.includes(t('card.context.compact_hint'))` 反推是否超阈值：覆盖成空串时
+  // `includes('')` 恒真 ⟹ 每张卡都变红。颜色必须问 contextOverCompactThreshold()，
+  // 与 footer 追加提示用的是同一个谓词。
+  describe('line colour never derives from the (customizable) hint copy', () => {
+    afterEach(() => { setPromptOverrideResolver(undefined); });
+
+    it('stays grey below the threshold even when the hint copy is overridden to an empty string', () => {
+      setPromptOverrideResolver((key) => (key === 'card.context.compact_hint' ? '' : undefined));
+      const card = build({
+        status: 'working',
+        usage: { context: { usedTokens: 34_300, windowTokens: 258_400, percentUsed: 13 } },
+      });
+      const footer = card.elements.find(
+        (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('13%'),
+      );
+      expect(footer.content).toContain("color='grey'");
+      expect(footer.content).not.toContain("color='red'");
+    });
+
+    it('still turns red over the threshold when the hint copy is overridden to an empty string', () => {
+      setPromptOverrideResolver((key) => (key === 'card.context.compact_hint' ? '' : undefined));
+      const card = build({
+        status: 'working',
+        usage: { context: { usedTokens: 220_000, windowTokens: 258_400, percentUsed: 85 } },
+      });
+      const footer = card.elements.find(
+        (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('85%'),
+      );
+      // 覆盖成空串后提示文字消失，但**颜色仍然正确**——证明颜色不依赖那串文案。
+      expect(footer.content).toContain("color='red'");
+    });
+
+    it('stays grey below the threshold even when the model name contains the hint text', () => {
+      const card = build({
+        status: 'working',
+        usage: {
+          context: { usedTokens: 34_300, windowTokens: 258_400, percentUsed: 13 },
+          model: '建议压缩-v2',
+        },
+      });
+      const footer = card.elements.find(
+        (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && e.content.includes('13%'),
+      );
+      expect(footer.content).toContain("color='grey'");
+      expect(footer.content).not.toContain("color='red'");
+    });
   });
 });
 
