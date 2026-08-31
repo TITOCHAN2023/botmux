@@ -309,6 +309,89 @@ describe('handleCotThinkingUpdate', () => {
     expect(resultFor('g5').language).toBeUndefined();
   });
 
+  /**
+   * Regression: truncation is a rendering concern and must not feed logic.
+   * The first version resolved the language off the DISPLAY string, so any
+   * path longer than the 80-char title cap lost its extension to the ellipsis
+   * and silently fell back to plaintext.
+   */
+  it('detects the language from the untruncated path, not the shortened title', async () => {
+    const ds = makeDs();
+    const longPath = '/root/iserver/botmux/src/very/deeply/nested/directory/structure/that/goes/on/module.ts';
+    expect(longPath.length).toBeGreaterThan(80); // the case only bites past the cap
+    handleCotThinkingUpdate(ds, upd([
+      { kind: 'tool_call', id: 'L', name: 'Read', args: JSON.stringify({ file_path: longPath }) },
+      { kind: 'tool_result', id: 'L', result: 'export const x = 1;' },
+    ]));
+    await flush();
+    const title = pushedEvents().find(e => e.type === 'TOOL_CALL_START')!.content.title as string;
+    const body = JSON.parse(pushedEvents().find(e => e.type === 'TOOL_CALL_RESULT')!.content.content);
+    expect(title.endsWith('…')).toBe(true);   // still bounded for layout
+    expect(title).not.toContain('.ts');        // extension really is cut from the title
+    expect(body.language).toBe('typescript');  // …yet detection still sees it
+  });
+
+  /**
+   * The transcript layer hard-cuts args at 600 chars, so a Write/Edit whose
+   * `content` dwarfs the path arrives as unparseable JSON. The leading
+   * `"file_path":"…"` survives that cut, so recover it rather than showing a
+   * bare label.
+   */
+  it('recovers a subject by regex when oversized args arrive truncated', async () => {
+    const ds = makeDs();
+    const path = '/root/iserver/botmux/src/core/worker-pool.ts';
+    const full = JSON.stringify({ file_path: path, content: 'x'.repeat(2000) });
+    const truncated = full.slice(0, 600); // exactly what truncateForCot does
+    expect(() => JSON.parse(truncated)).toThrow(); // precondition: really broken
+
+    handleCotThinkingUpdate(ds, upd([
+      { kind: 'tool_call', id: 'W', name: 'Write', args: truncated },
+      { kind: 'tool_result', id: 'W', result: 'ok' },
+      // A value cut mid-string must NOT be shown half-rendered.
+      { kind: 'tool_call', id: 'W2', name: 'Write', args: '{"file_path":"/a/b/unterminat' },
+      { kind: 'tool_result', id: 'W2', result: 'ok' },
+    ]));
+    await flush();
+    const titleOf = (id: string): string =>
+      pushedEvents().find(e => e.type === 'TOOL_CALL_START' && e.content.toolCallId === id)!.content.title;
+    const bodyOf = (id: string): any =>
+      JSON.parse(pushedEvents().find(e => e.type === 'TOOL_CALL_RESULT' && e.content.toolCallId === id)!.content.content);
+
+    expect(titleOf('W')).toContain(path);
+    expect(titleOf('W')).not.toContain('{');       // never the JSON fragment
+    expect(bodyOf('W').language).toBe('typescript'); // recovery feeds detection too
+    // Incomplete pair → no match → bare label, exactly as before.
+    expect(titleOf('W2')).toBe('编辑文件');
+    expect(bodyOf('W2').language).toBeUndefined();
+  });
+
+  it('keeps sub-agent and fetch style calls honest', async () => {
+    const ds = makeDs();
+    handleCotThinkingUpdate(ds, upd([
+      // description/prompt are the only identifying fields a Task call has.
+      { kind: 'tool_call', id: 'T', name: 'TaskCreate', args: JSON.stringify({ subject: '跑一遍回归', activeForm: '跑回归' }) },
+      { kind: 'tool_result', id: 'T', result: 'created' },
+      { kind: 'tool_call', id: 'A', name: 'Agent', args: JSON.stringify({ description: 'Find the auth flow', subagent_type: 'Explore' }) },
+      { kind: 'tool_result', id: 'A', result: 'found' },
+      // A .json URL must not label fetched prose as json.
+      { kind: 'tool_call', id: 'F', name: 'WebFetch', args: JSON.stringify({ url: 'https://example.com/api/spec.json' }) },
+      { kind: 'tool_result', id: 'F', result: 'The page describes…' },
+      // execute_* is not a shell despite containing "exec".
+      { kind: 'tool_call', id: 'S', name: 'execute_sql', args: JSON.stringify({ query: 'select 1' }) },
+      { kind: 'tool_result', id: 'S', result: '1' },
+    ]));
+    await flush();
+    const titleOf = (id: string): string =>
+      pushedEvents().find(e => e.type === 'TOOL_CALL_START' && e.content.toolCallId === id)!.content.title;
+    const bodyOf = (id: string): any =>
+      JSON.parse(pushedEvents().find(e => e.type === 'TOOL_CALL_RESULT' && e.content.toolCallId === id)!.content.content);
+
+    expect(titleOf('T')).toContain('跑一遍回归');
+    expect(titleOf('A')).toContain('Find the auth flow');
+    expect(bodyOf('F').language).toBeUndefined(); // not "json"
+    expect(bodyOf('S').language).toBeUndefined(); // not "bash"
+  });
+
   it('bounds an overlong command so the title stays one readable line', async () => {
     const ds = makeDs();
     const long = `echo ${'x'.repeat(500)}`;

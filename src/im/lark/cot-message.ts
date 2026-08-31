@@ -348,55 +348,95 @@ function toolMeta(name: string): { icon: string; labelKey: string } {
 }
 
 /**
- * The one-line subject shown after the category label — the actual command
- * for a shell call, the path for a file op.
+ * The one-line subject for a tool call, in two forms.
  *
- * Why this lives in the title at all: Feishu's CoT renderer does NOT draw
- * TOOL_CALL_ARGS. Verified by a live A/B in a real chat — a node sending the
- * full JSON args and a control node sending no args event whatsoever render
- * identically, and reshaping the payload (bare string, `{type:'code'}`
+ * `full` is the whole single-line subject; `display` is `full` bounded to the
+ * title's layout limit. They are separate because truncation is a RENDERING
+ * concern and must not feed logic: resolving the highlight language off the
+ * display string silently loses the extension of any path longer than the
+ * cap (an 86-char `.ts` path degrades to plaintext), which is a bug reported
+ * against the first version of this change.
+ *
+ * Why the subject lives in the title at all: Feishu's CoT renderer does NOT
+ * draw TOOL_CALL_ARGS. Verified by a live A/B in a real chat — a node sending
+ * the full JSON args and a control node sending no args event whatsoever
+ * render identically, and reshaping the payload (bare string, `{type:'code'}`
  * envelope) changes nothing. A second TOOL_CALL_RESULT on the same call is
  * dropped too, so the title is the only surviving carrier. The args event is
  * still sent — it costs nothing and a future client may render it.
  *
  * `args` is whatever the CLI produced: a JSON object string for Claude
- * (`{"command":…}` / `{"file_path":…}`), but Codex's dominant `custom_tool_call`
- * ships a raw non-JSON script string. Anything unparseable falls back to the
- * raw text, and anything we can't make sense of returns '' so the caller
- * keeps today's bare label rather than rendering something like `[object
- * Object]`.
+ * (`{"command":…}` / `{"file_path":…}`), but Codex's dominant
+ * `custom_tool_call` ships a raw non-JSON script string, which is used as-is.
+ * Text that LOOKS like JSON but will not parse is treated as truncated: the
+ * priority fields are recovered by regex where possible (the transcript layer
+ * hard-cuts args at 600 chars, which mangles Write/Edit payloads whose
+ * `content` dwarfs the path, yet leaves the leading `"file_path":"…"` intact),
+ * and only a total miss yields ''. Every "no usable subject" path returns ''
+ * so the caller keeps the bare category label — exactly the pre-change
+ * rendering.
  */
-function toolTitleSubject(args: string): string {
+interface ToolSubject { display: string; full: string }
+
+/** Fields ordered by how well each identifies the call to a human reader.
+ *  `command` covers Claude's Bash and Codex's local_shell_call action;
+ *  `description`/`prompt` catch sub-agent and task-style calls that carry no
+ *  path or command of their own. */
+const COT_SUBJECT_FIELDS = [
+  'command', 'cmd', 'file_path', 'path', 'pattern', 'query', 'url', 'skill', 'subject',
+  'description', 'prompt',
+] as const;
+
+function toolTitleSubject(args: string): ToolSubject {
+  const none: ToolSubject = { display: '', full: '' };
   const raw = args.trim();
-  if (raw.length === 0) return '';
+  if (raw.length === 0) return none;
   let subject = raw;
   if (raw.startsWith('{')) {
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
-    // Looks like JSON but isn't parseable (truncated by the transcript's own
-    // arg cap, most likely): showing the broken fragment as the subject is
-    // worse than showing nothing, so degrade to the bare label.
-    if (!parsed || typeof parsed !== 'object') return '';
-    const o = parsed as Record<string, unknown>;
-    // Ordered by how well the field identifies the call to a human reader.
-    // `command` covers Claude's Bash and Codex's local_shell_call action.
-    const pick = ['command', 'cmd', 'file_path', 'path', 'pattern', 'query', 'url', 'skill', 'subject']
-      .map(k => o[k])
-      .find(v => (typeof v === 'string' && v.trim().length > 0) || Array.isArray(v));
-    if (pick === undefined) return '';
-    // local_shell_call renders `command` as ["bash","-lc","…"] — the last
-    // element is the script; joining the argv would bury it in boilerplate.
-    subject = Array.isArray(pick)
-      ? String(pick[pick.length - 1] ?? '').trim()
-      : String(pick).trim();
-    if (subject.length === 0) return '';
+    if (parsed && typeof parsed === 'object') {
+      const o = parsed as Record<string, unknown>;
+      const pick = COT_SUBJECT_FIELDS
+        .map(k => o[k])
+        .find(v => (typeof v === 'string' && v.trim().length > 0) || Array.isArray(v));
+      if (pick === undefined) return none;
+      // local_shell_call renders `command` as ["bash","-lc","…"] — the last
+      // element is the script; joining the argv would bury it in boilerplate.
+      subject = Array.isArray(pick)
+        ? String(pick[pick.length - 1] ?? '').trim()
+        : String(pick).trim();
+      if (subject.length === 0) return none;
+    } else {
+      // Truncated JSON: rendering the raw `{"command":` fragment is worse than
+      // rendering nothing, but the leading fields usually survive the cut, so
+      // recover one by regex before giving up.
+      const recovered = recoverSubjectFromTruncatedJson(raw);
+      if (recovered === undefined) return none;
+      subject = recovered;
+    }
   }
   // Multi-line scripts must collapse: the title is one unwrapped line.
-  const oneLine = subject.replace(/\s+/g, ' ').trim();
-  if (oneLine.length === 0) return '';
-  return oneLine.length > COT_TOOL_TITLE_SUBJECT_MAX_CHARS
-    ? `${oneLine.slice(0, COT_TOOL_TITLE_SUBJECT_MAX_CHARS)}…`
-    : oneLine;
+  const full = subject.replace(/\s+/g, ' ').trim();
+  if (full.length === 0) return none;
+  const display = full.length > COT_TOOL_TITLE_SUBJECT_MAX_CHARS
+    ? `${full.slice(0, COT_TOOL_TITLE_SUBJECT_MAX_CHARS)}…`
+    : full;
+  return { display, full };
+}
+
+/** Pull the first priority field out of JSON that was cut mid-payload. Only
+ *  complete `"key":"value"` pairs match, so a value truncated mid-string is
+ *  skipped rather than shown half-rendered. */
+function recoverSubjectFromTruncatedJson(raw: string): string | undefined {
+  for (const key of COT_SUBJECT_FIELDS) {
+    const m = raw.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+    if (!m) continue;
+    let value: string;
+    try { value = JSON.parse(`"${m[1]}"`); } catch { continue; } // bad escape → skip
+    if (value.trim().length > 0) return value.trim();
+  }
+  return undefined;
 }
 
 /** Category label plus the concrete subject when one can be extracted. */
@@ -404,7 +444,6 @@ function toolTitle(ds: DaemonSession, entry: { name: string; args: string }, lab
   const label = t(labelKey, { name: entry.name }, localeForBot(ds.larkAppId));
   return subject.length > 0 ? `${label} · ${subject}` : label;
 }
-
 /**
  * Syntax-highlighting language for a tool's output code block.
  *
@@ -430,7 +469,12 @@ function resultLanguage(toolName: string | undefined, subject: string | undefine
   if (!toolName) return undefined;
   const n = toolName.toLowerCase();
   // Shell output is shell-shaped regardless of what the command touched.
-  if (n.includes('bash') || n.includes('shell') || n.includes('command') || n.includes('exec')) return 'bash';
+  // `exec` is matched as a WHOLE word, not a substring: `execute_sql` /
+  // `execute_python` are ordinary tools whose output is not shell.
+  if (n.includes('bash') || n.includes('shell') || n.includes('command') || /(^|[^a-z])exec([^a-z]|$)/.test(n)) return 'bash';
+  // Fetch tools return a rendered page/summary, not the file the URL names —
+  // a `.json`/`.html` URL would otherwise mislabel prose as that language.
+  if (n.includes('fetch') || n.includes('search')) return undefined;
   // File tools: the subject is the path, so the extension names the language.
   const ext = subject?.match(/\.([A-Za-z0-9]+)\s*$/)?.[1]?.toLowerCase();
   return ext ? COT_EXT_LANGUAGES[ext] : undefined;
@@ -454,8 +498,10 @@ function entryEvents(ds: DaemonSession, state: CotState, entry: CotEntry, index:
     const subject = toolTitleSubject(entry.args);
     // A tool_result entry carries only {id, result} — no tool name — so the
     // language has to be resolved here, while the call's name and subject are
-    // in hand, and remembered for the matching result.
-    const lang = resultLanguage(entry.name, subject);
+    // in hand, and remembered for the matching result. Detection uses the
+    // UNTRUNCATED subject: a path longer than the title cap still ends in its
+    // extension, which the display string has already lost to the ellipsis.
+    const lang = resultLanguage(entry.name, subject.full);
     if (lang) {
       if (!state.resultLanguages) state.resultLanguages = new Map();
       state.resultLanguages.set(entry.id, lang);
@@ -464,7 +510,7 @@ function entryEvents(ds: DaemonSession, state: CotState, entry: CotEntry, index:
       ev('TOOL_CALL_START', {
         toolCallId: entry.id,
         icon: meta.icon,
-        title: toolTitle(ds, entry, meta.labelKey, subject),
+        title: toolTitle(ds, entry, meta.labelKey, subject.display),
         toolCallName: entry.name,
         ...(state.lastReasoningId ? { parentMessageId: state.lastReasoningId } : {}),
       }),
