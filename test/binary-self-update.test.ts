@@ -118,6 +118,55 @@ describe('classifyBinaryInstall — where the binary lives decides who updates i
 
     expect(mainPackageRootForSubpackageBinary('/home/u/.botmux/bin/botmux')).toBeNull();
   });
+
+  it("THE npm BUG: the platform package NESTS inside the main package, and that layout must resolve", () => {
+    // REGRESSION for the defect that shipped through 3.18.5→3.18.8: only the
+    // SIBLING layout was handled, but MEASURED on a real `npm i -g botmux`
+    // (npm 10.9.4) the platform subpackage lands INSIDE the main package, because
+    // npm does not hoist a package's own deps to the global root (peer globals
+    // nest identically: pm2 112 nested deps, http-server 47).
+    //
+    // Pre-fix this returned `…/node_modules/botmux/node_modules/botmux` — a
+    // directory that does not exist and matches no manager — so detect said
+    // `unknown`, the plan was null, and `botmux update` / the dashboard button /
+    // scheduled auto-update all reported "无法安全识别当前安装方式".
+    const nested = '/usr/lib/node_modules/botmux/node_modules/botmux-linux-x64/botmux';
+    const root = mainPackageRootForSubpackageBinary(nested);
+    // The MAIN package, NOT a second `botmux` below it.
+    expect(root).toBe('/usr/lib/node_modules/botmux');
+    expect(root).not.toBe('/usr/lib/node_modules/botmux/node_modules/botmux');
+    // End to end: it must reach npm with the prefix of the tree it came from.
+    // Verified against the real install on the dev box: this prefix is byte-equal
+    // to `npm prefix -g`.
+    expect(formatGlobalInstallCommand(tryResolveGlobalInstallPlan(root!, 'linux')!))
+      .toBe('npm install -g --prefix /usr botmux@latest');
+    // …and the strategy as a whole, which is what the three callers consume.
+    expect(resolveUpdateStrategy(true, nested, '/', {}, '/home/u'))
+      .toEqual({ kind: 'package-manager', packageRoot: '/usr/lib/node_modules/botmux' });
+    // The musl subpackage nests the same way.
+    expect(mainPackageRootForSubpackageBinary(
+      '/usr/lib/node_modules/botmux/node_modules/botmux-linux-x64-musl/botmux',
+    )).toBe('/usr/lib/node_modules/botmux');
+  });
+
+  it('the SIBLING layout still resolves — Bun hoists, so it is not obsolete', () => {
+    // Guard against "fixing" the nested case by REPLACING the sibling rule.
+    // MEASURED on the same box: Bun's global tree hoists (a declared global
+    // package with dependencies has 0 entries in its own node_modules), so a
+    // Bun-installed platform subpackage really is a sibling of the main package.
+    expect(mainPackageRootForSubpackageBinary('/root/.bun/install/global/node_modules/botmux-linux-x64/botmux'))
+      .toBe('/root/.bun/install/global/node_modules/botmux');
+    expect(mainPackageRootForSubpackageBinary('/usr/lib/node_modules/botmux-linux-x64/botmux'))
+      .toBe('/usr/lib/node_modules/botmux');
+  });
+
+  it('a subpackage nested under some OTHER package is not claimed as ours', () => {
+    // The nested rule is anchored on an enclosing package literally named
+    // `botmux`; a botmux platform binary vendored inside an unrelated dependency
+    // must not make us hand THAT package root to a global install command.
+    expect(mainPackageRootForSubpackageBinary('/app/node_modules/other/node_modules/botmux-linux-x64/botmux'))
+      .toBe('/app/node_modules/other/node_modules/botmux');
+  });
 });
 
 describe('resolveUpdateStrategy', () => {
