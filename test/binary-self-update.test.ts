@@ -151,13 +151,26 @@ describe('classifyBinaryInstall — where the binary lives decides who updates i
 
   it('the SIBLING layout still resolves — Bun hoists, so it is not obsolete', () => {
     // Guard against "fixing" the nested case by REPLACING the sibling rule.
-    // MEASURED on the same box: Bun's global tree hoists (a declared global
-    // package with dependencies has 0 entries in its own node_modules), so a
-    // Bun-installed platform subpackage really is a sibling of the main package.
+    // MEASURED on a real `bun add -g botmux` (bun 1.4.0): the platform subpackage
+    // botmux-linux-x64 is a real directory BESIDE the main package.
     expect(mainPackageRootForSubpackageBinary('/root/.bun/install/global/node_modules/botmux-linux-x64/botmux'))
       .toBe('/root/.bun/install/global/node_modules/botmux');
     expect(mainPackageRootForSubpackageBinary('/usr/lib/node_modules/botmux-linux-x64/botmux'))
       .toBe('/usr/lib/node_modules/botmux');
+  });
+
+  it('EITHER shape resolves to the same root, so no manager needs a layout promise', () => {
+    // Bun HOISTS BY DEFAULT but does not guarantee it: measured 38 nested
+    // node_modules inside one real bun global tree (it nests in place on a version
+    // conflict). So "bun ⇒ sibling" is the common case, not an invariant, and the
+    // mapping must not depend on which manager produced the path. Both shapes of
+    // the same install must land on the same main package root.
+    const nested = '/root/.bun/install/global/node_modules/botmux/node_modules/botmux-linux-x64/botmux';
+    const sibling = '/root/.bun/install/global/node_modules/botmux-linux-x64/botmux';
+    expect(mainPackageRootForSubpackageBinary(nested))
+      .toBe(mainPackageRootForSubpackageBinary(sibling));
+    expect(mainPackageRootForSubpackageBinary(nested))
+      .toBe('/root/.bun/install/global/node_modules/botmux');
   });
 
   it('a subpackage nested under some OTHER package is not claimed as ours', () => {
