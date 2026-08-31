@@ -3,6 +3,7 @@ import { getMessageDetail } from './client.js';
 import { logger } from '../../utils/logger.js';
 import {
   REPLY_CARD_FOOTER_ELEMENT_ID,
+  REPLY_CARD_HEADING_ELEMENT_ID_RE,
 } from './reply-card-footer-signature.js';
 import { hasBotmuxCallbackMarker } from './callback-button-marker.js';
 
@@ -1482,6 +1483,21 @@ function extractElementText(el: any, parts: string[], imgLabel: (key: string) =>
     && hasExactMarkerMarkdown(elementText)
   ) {
     return;
+  }
+
+  // Promoted H1/H2 heading widgets: Lark strips `text_size` when a message is
+  // read back, so the ATX prefix is rebuilt from the element id (the only
+  // carrier that survives normalization). This keeps heading hierarchy across
+  // sessions and lets a cross-bot re-send promote the line again.
+  if (tag === 'markdown' && typeof el.element_id === 'string') {
+    const idMatch = REPLY_CARD_HEADING_ELEMENT_ID_RE.exec(el.element_id);
+    if (idMatch) {
+      const heading = (typeof elementText === 'string' ? elementText : nestedCardText(el))?.trim();
+      if (heading) {
+        parts.push(`${'#'.repeat(Number(idMatch[1]))} ${heading}`);
+        return;
+      }
+    }
   }
 
   // div / markdown / plain_text blocks

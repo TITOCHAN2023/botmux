@@ -104,14 +104,22 @@ describe('buildCardBodyElements', () => {
   it('promotes H1/H2 to standalone heading components', () => {
     const out = buildCardBodyElements('# Title\n\nbody text');
     expect(out).toEqual([
-      { tag: 'markdown', text_size: 'heading-2', content: 'Title' },
+      { tag: 'markdown', element_id: 'botmux_md_h1_1', text_size: 'heading-2', content: 'Title' },
       { tag: 'markdown', content: 'body text' },
     ]);
 
     expect(buildCardBodyElements('## Section\n\nbody')).toEqual([
-      { tag: 'markdown', text_size: 'heading-2', content: 'Section' },
+      { tag: 'markdown', element_id: 'botmux_md_h2_1', text_size: 'heading-2', content: 'Section' },
       { tag: 'markdown', content: 'body' },
     ]);
+  });
+
+  it('encodes the original ATX level and a per-card sequence in heading element ids', () => {
+    // Message reads strip text_size, so the element id is the only carrier of
+    // heading hierarchy that survives Lark normalization (see message-parser).
+    const out = buildCardBodyElements('# 结果\n\n正文\n\n## 验证\n\n更多\n\n## 下一步\n\n尾声');
+    const ids = out.filter((e: any) => e.element_id).map((e: any) => e.element_id);
+    expect(ids).toEqual(['botmux_md_h1_1', 'botmux_md_h2_2', 'botmux_md_h2_3']);
   });
 
   it('keeps H3-H6 compact as bold markdown', () => {

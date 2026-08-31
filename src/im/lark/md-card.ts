@@ -29,6 +29,7 @@ import { t, type Locale } from '../../i18n/index.js';
 import {
   REPLY_CARD_FOOTER_ELEMENT_ID,
   REPLY_CARD_FOOTER_MARKER,
+  replyCardHeadingElementId,
 } from './reply-card-footer-signature.js';
 import { buildFeedbackElement } from './skill-feedback-card.js';
 import type { FeedbackPolicy } from '../../services/feedback-policy.js';
@@ -804,14 +805,20 @@ function buildMarkdownElements(
       if (promote) {
         // Feishu's markdown widget does not render ATX markers. A standalone
         // Card JSON 2.0 20px heading restores hierarchy without making H1
-        // model output dominate the card.
+        // model output dominate the card. The element id carries the original
+        // ATX level because message reads strip `text_size` — without it the
+        // heading would come back as bare glued text.
         flushBuf();
+        layoutBudget.promotedHeadings++;
         elements.push({
           tag: 'markdown',
+          element_id: replyCardHeadingElementId(
+            level as 1 | 2,
+            layoutBudget.promotedHeadings,
+          ),
           text_size: 'heading-2',
           content: text,
         });
-        layoutBudget.promotedHeadings++;
       } else if (text) {
         // H3-H6 and headings beyond the safety budget retain the established
         // compact fallback instead of increasing the component count further.

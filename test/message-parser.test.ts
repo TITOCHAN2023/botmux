@@ -809,6 +809,57 @@ describe('Interactive card parsing: botmux footer is stripped from prompt', () =
     expect(result.content).toContain('| 标题层级 | H1/H2 heading-2 |');
   });
 
+  it('rebuilds ATX headings from element ids after Lark strips text_size', () => {
+    // Fixture mirrors the live read-back shape: text_size is gone entirely and
+    // the content survives only inside the normalized rendered tree, so the
+    // element id is the single carrier of heading hierarchy.
+    const normalizedHeading = (elementId: string, content: string) => ({
+      tag: 'markdown',
+      element_id: elementId,
+      property: {
+        elements: [{ tag: 'plain_text', property: { content, textAlign: 'left' } }],
+        markdownElements: [],
+        originTag: 'lark_md',
+      },
+    });
+    const card = {
+      schema: '2.0',
+      body: { direction: 'vertical', elements: [
+        normalizedHeading('botmux_md_h1_1', '执行结果'),
+        { tag: 'markdown', content: '核心链路已验证。' },
+        normalizedHeading('botmux_md_h2_2', '验证命令'),
+        { tag: 'markdown', content: 'bun run build' },
+      ] },
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+
+    expect(result.content).toContain('# 执行结果\n核心链路已验证。');
+    expect(result.content).toContain('## 验证命令\nbun run build');
+    // The bare glued form the pre-fix reader produced must be gone.
+    expect(result.content).not.toContain('执行结果\n核心链路已验证。\n验证命令');
+  });
+
+  it('keeps builder → parser heading round-trip promotable on re-send', () => {
+    const raw = buildMarkdownCard('# 执行结果\n\n核心链路已验证。\n\n## 验证命令\n\n收尾');
+    const result = parseApiMessage(makeMsg('interactive', JSON.parse(raw)));
+    expect(result.content).toContain('# 执行结果');
+    expect(result.content).toContain('## 验证命令');
+  });
+
+  it('leaves foreign heading-like element ids untouched', () => {
+    const card = {
+      schema: '2.0',
+      body: { elements: [
+        { tag: 'markdown', element_id: 'botmux_md_h3_1', content: '不是我们的层级' },
+        { tag: 'markdown', element_id: 'vendor_md_h1_1', content: '第三方组件' },
+      ] },
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('不是我们的层级');
+    expect(result.content).toContain('第三方组件');
+    expect(result.content).not.toContain('# ');
+  });
+
   it('round-trips a footer whose custom brand contains an unmatched bracket', () => {
     const raw = buildMarkdownCard('正文内容', 'ou_owner', 'Acme [beta');
     const result = parseApiMessage(makeMsg('interactive', JSON.parse(raw)));
