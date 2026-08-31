@@ -144,6 +144,16 @@ export interface CliAdapter {
      *  their per-bot built-in skill injection mode for the system-prompt catalog;
      *  inline-prompt CLIs get theirs from session-manager instead. */
     larkAppId?: string;
+    /** No-transport session (apiOnly core-only bot OR HTTP virtual chat, i.e.
+     *  `!larkTransportEnabled({chatId, apiOnly})`). injectsSessionContext adapters
+     *  that build the routing block via `buildBotmuxSystemPromptText`
+     *  (claude-code / genius / grok) forward this so the send/@/silence
+     *  collaboration block is dropped for a program request/response turn — where
+     *  it is both noise and (for usage_silence) a conflict with the per-turn
+     *  <botmux_http_response_mode>. Non-injects CLIs get the same gate via
+     *  session-manager's buildBotmuxShellHints. Adapters without a routing block
+     *  ignore it. */
+    noTransport?: boolean;
     /** UI / response language for prompts injected into the CLI (e.g. zh / en). */
     locale?: import('../../i18n/index.js').Locale;
     /** Optional model name from BotConfig.model. Adapters whose CLI accepts a
@@ -364,6 +374,13 @@ export interface CliAdapter {
    *  may be no new PTY output: if the current screen does NOT match this marker,
    *  the worker may safely let quiescence mark the session idle. */
   readonly busyPattern?: RegExp;
+
+  /**
+   * Optional runtime session busy check against the CLI's native state store
+   * (e.g. OpenCode SQLite db). When true, suppresses premature idle detection
+   * even if PTY output has quiesced.
+   */
+  readonly isSessionBusy?: (opts: { sessionId: string; cliSessionId?: string }) => boolean;
 
   /** Opt-in positive marker for an idle→working edge observed in PTY output.
    *  Kept separate from busyPattern because transcript/full-screen redraws may

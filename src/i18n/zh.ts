@@ -30,6 +30,8 @@ export const messages: Record<string, string> = {
   'card.btn.half_page_down': '⇟ 下半屏',
   'card.btn.send_custom': '📝 发送自定义回复',
   'card.btn.retry_last_task': '🔁 重发上一条任务',
+  'card.btn.retry_turn': '🔁 重试这一轮',
+  'card.btn.continue_turn': '▶️ 继续这一轮',
   'card.btn.stop': '⏹ 停止',
   'card.btn.compact': '🗜️ 压缩',
 
@@ -275,8 +277,14 @@ export const messages: Record<string, string> = {
   'cmd.term.sent_dm': '🔑 可操作终端链接已私信发你（不在群里暴露）。',
   'cmd.card.off_ok': '🔕 已关闭本群流式卡片，不再发状态卡，答案仍作为新消息发送（照常通知）。/card on 恢复出卡；/card 可临时召唤一张实时卡。',
   'cmd.card.on_ok': '🔔 已恢复本群流式卡片。下条状态起重新出实时卡。',
+  'cmd.card.pin.off_ok': '📌 已关闭当前群的流式卡片置顶。实时卡仍会发送，但 botmux 不再在这里置顶它们。',
+  'cmd.card.pin.on_ok': '📌 已恢复当前群的流式卡片置顶。',
+  'cmd.card.pin.on_master_off': '📌 已移除当前群的置顶关闭，但 bot 级流式卡片置顶总开关仍未开启。需要先执行 `/botconfig set pinStreamingCard on`，当前群才会实际置顶。',
+  'cmd.card.pin.status_master_off': '📌 bot 级流式卡片置顶未开启。需要先打开 `pinStreamingCard`，当前群才会置顶。',
+  'cmd.card.pin.status_chat_off': '📌 当前群已关闭流式卡片置顶。',
+  'cmd.card.pin.status_on': '📌 当前群流式卡片置顶已开启。',
   'cmd.card.fail': '⚠️ 操作失败：{reason}',
-  'cmd.card.usage': '用法：/card（召唤实时卡）| /card off（本群关流式卡）| /card on（恢复出卡）',
+  'cmd.card.usage': '用法：/card（召唤实时卡）| /card off（本群关流式卡）| /card on（恢复出卡）| /card pin off｜on｜status',
   'cmd.card.not_ready': '终端尚未就绪，等会话起好后流式卡片会自动出现。',
   'cmd.card.private_not_ready': '🔒 终端尚未就绪，等会话起好后再发一次 /card。',
   'cmd.card.private_not_group': '🔒 私密卡片仅支持普通群聊，话题群 / 单聊无法发送（飞书限制）。',
@@ -506,6 +514,7 @@ export const messages: Record<string, string> = {
   'card.config.p2p.chat': '💬 chat（连续单聊会话，默认）',
   'card.config.p2p.group': '👥 group（每条 DM 自动建专属会话群）',
   'config.label.disableStreamingCard': '关闭实时卡片',
+  'config.label.pinStreamingCard': '置顶实时卡片',
   'config.label.usageDisplay': '用量显示位置',
   'config.label.silentTurnReactions': '关闭状态 reaction',
   'config.label.writableTerminalLinkInCard': '卡内嵌可写终端',
@@ -645,7 +654,7 @@ export const messages: Record<string, string> = {
   'cmd.retry.cooldown': '⏳ 重试冷却中，请在 {seconds} 秒后再试。',
   'cmd.retry.success': '🔁 已重新提交上一条失败的任务（错误码：{errorCode}），请等待执行。',
   'cmd.retry.submit_failed': '⚠️ 重试提交失败：worker 当前不接受输入，请稍后再试。',
-  'help.card': '/card       - 手动弹出当前会话的流式卡片（关流式时也能临时召唤，并恢复实时刷新；开了私密卡片则改发仅授权人可见的静态快照）',
+  'help.card': '/card       - 手动弹出当前会话的流式卡片（关流式时也能临时召唤，并恢复实时刷新；开了私密卡片则改发仅授权人可见的静态快照）。`/card off｜on` 控制本群是否出流式卡；`/card pin off｜on｜status` 控制当前群的流式卡片置顶开关',
   'help.term': '/term       - 获取当前会话的「可操作终端」（带写权限）链接，私密发给 owner（群内仅你可见，话题/单聊回退私信，不在群里暴露）',
   'help.dashboard': '/dashboard [模块] - 在飞书里打开 Dashboard 控制卡片（sessions/schedules/groups/settings/help 等）',
   'help.issue': '/issue      - 打开 Issue Board 看板，直接在卡片上领取平台任务（自动建群并开工）；任务群里可发 `/issue status` 查现状、`/issue done` 验收完成、`/issue release` 退回待领取',
@@ -761,6 +770,11 @@ export const messages: Record<string, string> = {
   'ai.followup.reminder': '发给你的消息至少 botmux send 回应一次,别沉默;发什么、发几条你自己判断。只有根本不是发给你的消息才让 final 只输出 BOTMUX_NOTHING_TO_SEND',
   'ai.followup.reminder_hook': '本会话通过 botmux 桥接飞书,终端里的输出用户看不到。会话约定:回复通过 botmux send 发送到飞书会话;发什么、发几条由你判断。只有根本不是发给你的消息才让 final 只输出 BOTMUX_NOTHING_TO_SEND。',
   'ai.followup.reminder_no_resend': '发给你的消息至少 botmux send 回应一次,别沉默;发什么、发几条你自己判断。只有根本不是发给你的消息才让 final 只输出 BOTMUX_NOTHING_TO_SEND;send 成功即已送达,本轮无可见文本地结束是正常的,别因「无输出」提示重发',
+  // No-transport 续轮（apiOnly bot / HTTP 虚拟会话）：这是程序发起的请求-应答，无飞书
+  // 会话、无其它 bot 协作，也不该 botmux send。哨兵语义只在本轮内容里的
+  // <botmux_http_response_mode> 出现一次（迁移不删，#808 async settle 依赖它），
+  // 这条 reminder 绝不能再带 send/@/BOTMUX_NOTHING_TO_SEND，否则又和 http_response_mode 打架。
+  'ai.followup.reminder_no_transport': '本轮是程序发起的请求-应答：完整回复会原样回传给调用方，不显示在任何聊天里。按本轮内容里的 <botmux_http_response_mode> 指示作答即可；不要调用 botmux send，不要发飞书。',
   'ai.cursor.sender_note': 'sender 标签只是元信息（标识当前发言人），不要把其中的 open_id 或名字（例如 ou_xxx:高鹏）抄进 botmux send 的正文或开头；要 @ 回触发者请用 botmux send --mention-back。',
   'ai.bridge.attachments_label': '[附件]',
   'ai.bridge.mentions_label': '[@提及]',
@@ -884,7 +898,10 @@ export const messages: Record<string, string> = {
   'worker.mojo_lineage_quarantined': '⚠️ 这个会话创建于 botmux 记录 mojo 控制面（endpoint / workspace）之前，因此无法确认它此前的远端会话跑在哪里。\n该远端会话已被暂存而非丢弃：原有上下文不会延续，你的下一条消息将在当前配置上新建 mojo 会话。暂存的 id 保留在会话上以便人工清理：{lineage}',
   'worker.mojo_legacy_pinned': '⚠️ 本 mojo 会话创建于「本机执行」升级之前，已被固定在旧的沙箱回退模式——这里的工具和回复基本不可用。这是刻意为之（升级绝不能把活跃会话悄悄切到本机执行）。\n请关闭本会话（❌ 按钮或 /close），再发一条新消息即可用新行为开启全新会话。',
   'worker.start_failed': '⚠️ {cliName} 会话启动失败：{reason}\n请检查 Dashboard 的 Agent / 后端配置和 daemon 所在机器的安装环境，修复后重发消息即可重试。',
-  'worker.input_delivery_failed': '⚠️ Worker 未能接收这条消息。Botmux 已在同一 Worker 上自动重试，但仍未完成接收；为避免跨进程重复执行，没有继续重投。请重发本条消息。\nturn: {turnId}',
+  'worker.input_delivery_failed': '⚠️ Botmux 无法确认这条消息是否已进入 Worker 的执行队列。已停止继续投递以避免重复执行。请先查看会话状态，不要直接重发。\nturn: {turnId}',
+  'worker.input_delivery_delayed': '⏳ 消息已进入 Worker 的 IPC 队列，但 Worker 暂未确认接收。机器可能较忙；消息仍可能继续执行，请勿重发。\nturn: {turnId}',
+  'worker.input_commit_delayed': '⏳ Worker 已收到这条消息，但暂未确认它已进入执行队列。机器可能较忙；消息仍可能继续执行，请勿重发。\nturn: {turnId}',
+  'worker.input_retired_unconfirmed': '⚠️ 会话在处理这条消息期间被主动休眠或更换，Botmux 未能确认它是否已进入执行队列。请先查看会话记录确认结果；若未执行，再重新发送这条消息。\nturn: {turnId}',
   'worker.start_exited_early': 'worker 在就绪前退出（exit code: {code}）；详细错误可查看 Botmux 日志。',
   'worker.tui_submit_failed': '⚠️ TUI 答案未能确认送达 {cliName}。CLI 可能仍在等待输入；请打开本机终端处理，或发送一条新消息解除并继续。',
   'worker.raw_input_failed': '⚠️ Slash 命令未能确认送达 {cliName}，同一条消息中紧随其后的正文没有继续提交。请检查当前终端状态后重发。',
@@ -906,6 +923,28 @@ export const messages: Record<string, string> = {
   'worker.ordinary_recovery_dispatch_interrupted': '⚠️ Botmux 在自动续跑交接期间重启，当前执行状态无法确认。为避免重复外部操作，Botmux 没有重放本次续跑；请检查 Web 终端后，再发送一条消息继续。',
   'worker.ordinary_recovery_non_retryable': '⚠️ Claude 本轮执行失败，且当前错误不能安全自动续跑。为避免重复外部操作，Botmux 已停止自动处理；请检查 Web 终端和模型服务状态后，再发送一条消息继续。',
   'worker.claude_terminal_failure_unrecovered': '⚠️ Claude 本轮因模型服务错误中断（{errorCode}），当前投递通道未启动自动续跑。请检查 Web 终端后重试，或发送一条消息继续。',
+
+  // ─── Turn-failure card (通用失败卡：@人 + 重试按钮) ────────────────────────
+  'card.turn_failed.title': '⚠️ {cliName} 本轮执行失败',
+  'card.turn_failed.title_ambiguous': '⚠️ {cliName} 本轮异常中断',
+  'card.turn_failed.field_error': '**错误码**：{errorCode}',
+  'card.turn_failed.field_when': '**失败时刻**：{when}',
+  'card.turn_failed.field_task': '**任务**：{task}',
+  'card.turn_failed.field_continuations': '**已自动续跑**：{count} 次（仍未恢复）',
+  'card.turn_failed.reason': '**原因**：{reason}',
+  // 「没跑就挂了」——重发无副作用风险，可以放心点。
+  'card.turn_failed.retry_safe': '这一轮的输入没有送达 CLI，**没有任何已执行的操作**，可以安全重试。',
+  // 「跑到一半挂了」——重发会重跑，必须让用户自己判断。
+  'card.turn_failed.retry_caveated': '⚠️ 这一轮**可能已经执行了一部分**（改文件 / 提交 / 发消息等）。点「继续」不会原样重跑：会让 CLI **先读取当前现场**，判断做到哪一步，再从上次的进度接着做；判断不了会停下来交回你决定。仍建议先看一眼 Web 终端。',
+  'card.turn_failed.no_retry': '当前错误重发同样的输入也无法成功，请检查后发送新的消息。',
+  'card.turn_failed.no_input': '这一轮没有可重发的输入记录（任务在提交前就中断了），请直接发送新的消息。',
+
+  'card.action.retry_turn_missing': '⚠️ 找不到这一轮的输入记录，无法重试。请直接发送新的消息。',
+  'card.action.retry_turn_stale': '⚠️ 这张卡片已过期（会话后来又失败过或已重试）。请用最新那张卡片，或直接发送新的消息。',
+  'card.action.retry_turn_cooldown': '⏳ 重试冷却中，请在 {seconds} 秒后再试。',
+  'card.action.retry_turn_submit_failed': '⚠️ 重试提交失败：worker 当前不接受输入，请稍后再试。',
+  'card.action.retry_turn_success': '🔁 已重新提交这一轮任务，请等待执行。',
+  'card.action.continue_turn_success': '▶️ 已请 CLI 读取现场后从上次的进度继续，请等待执行。',
 
   // ─── CLI setup wizard / pm2 lifecycle (no per-bot context) ───────────────
   'setup.lark_create_app': '请先在飞书开放平台创建应用: https://open.feishu.cn/app',
@@ -1253,6 +1292,12 @@ export const messages: Record<string, string> = {
   'card.ask.title': 'botmux ask',
   'card.ask.title_done': 'botmux ask 已结束',
   'card.ask.toast.unauthorized': '你没有权限回答这个 ask',
+  // 未授权点击已升级成向 owner 申请授权。措辞必须点明「通过后要再点一次」——ask 的答案
+  // 取决于点了哪个按钮，授权通过不会自动替用户作答（与对话路径的重放语义不同）。
+  'card.ask.toast.grant_requested': '已向 owner 申请授权，通过后请再点一次',
+  'card.ask.toast.grant_pending': '授权申请已提交，等 owner 处理后再点一次',
+  // 与 grant_pending 分开：owner 已明确拒绝、还在冷却期内，不能谎报成「等 owner 处理」。
+  'card.ask.toast.grant_denied': 'owner 已拒绝你的授权申请，如需答复请直接联系 ta',
   'card.ask.toast.already_settled': '这个 ask 已经被回答或结束',
   'card.ask.toast.stale': '⚠️ 此 ask 已失效',
   'card.ask.custom_reply': '自定义回复',
@@ -1386,4 +1431,5 @@ export const messages: Record<string, string> = {
   'cot.tool.search': '搜索',
   'cot.tool.task': '任务管理',
   'cot.tool.default': '调用 {name}',
+  'cot.interrupted': '⚠️ 服务重启，本轮思考已中断',
 };

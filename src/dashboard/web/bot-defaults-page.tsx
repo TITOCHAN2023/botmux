@@ -5,6 +5,7 @@ import {
   agentSelectionKey,
   cliIdOf,
   createRefreshGate,
+  createOncePerKeyGate,
   displayCliId,
   fallbackCliOptionsState,
   fetchBotDefaults,
@@ -693,6 +694,7 @@ function patchCardPrefsFromBody(bot: BotDefaultsRow, body: any): BotDefaultsRow 
     ...bot,
     usageDisplay: body.usageDisplay,
     disableStreamingCard: body.disableStreamingCard,
+    pinStreamingCard: body.pinStreamingCard,
     silentTurnReactions: body.silentTurnReactions,
     codexAppCleanInput: body.codexAppCleanInput,
     writableTerminalLinkInCard: body.writableTerminalLinkInCard,
@@ -704,6 +706,7 @@ function patchCardPrefsFromBody(bot: BotDefaultsRow, body: any): BotDefaultsRow 
     botToBotSameDir: body.botToBotSameDir,
     autoStartOnGroupJoin: body.autoStartOnGroupJoin,
     autoStartOnGroupJoinPrompt: body.autoStartOnGroupJoinPrompt,
+    autoStartOnGroupJoinSeed: body.autoStartOnGroupJoinSeed,
     autoStartOnNewTopic: body.autoStartOnNewTopic,
     regularGroupReplyMode: body.regularGroupReplyMode,
     regularGroupMentionMode: body.regularGroupMentionMode,
@@ -1066,7 +1069,7 @@ function BotDefaultsCard(props: {
         >
           <BdTabGrid>
             <section className="bd-tile bd-tile-wide"><CardBehaviorSection bot={bot} putCardPref={putCardPref} /></section>
-            <section className="bd-tile bd-tile-wide"><FeedbackSettingsSection bot={bot} patchBot={patchBot} /></section>
+            <section className="bd-tile bd-tile-wide"><FeedbackSettingsSection bot={bot} patchBot={patchBot} active={props.activeTab === 'cards'} /></section>
             <section className="bd-tile"><BrandSection bot={bot} patchBot={patchBot} /></section>
           </BdTabGrid>
         </div>
@@ -1106,7 +1109,7 @@ function BotDefaultsCard(props: {
   );
 }
 
-function FeedbackSettingsSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+function FeedbackSettingsSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; active: boolean }) {
   const enabled = props.bot.feedback?.enabled === true;
   const [on, setOn] = useState(enabled);
   const [json, setJson] = useState(JSON.stringify(props.bot.feedback ?? { enabled: true }, null, 2));
@@ -1115,15 +1118,38 @@ function FeedbackSettingsSection(props: { bot: BotDefaultsRow; patchBot: PatchBo
   const [chatId, setChatId] = useState('');
   const [chats, setChats] = useState<GroupChat[]>([]);
   const [preview, setPreview] = useState<any>(null);
+  // 「本 bot 的群列表已拉过（或正在拉）」闸门。见下面 effect 的注释：把 active
+  // 加进依赖会让每次切回 Cards tab 都重跑 effect，靠它收敛成「每 bot 一次」。
+  const chatsGateRef = useRef(createOncePerKeyGate());
   useEffect(() => {
     setOn(props.bot.feedback?.enabled === true);
     setJson(JSON.stringify(props.bot.feedback ?? { enabled: true }, null, 2));
   }, [props.bot.feedback]);
   useEffect(() => {
+    // 这个区块要的是 memberBots（筛「本 bot 已在群」的群列表），只有完整矩阵
+    // 有 —— 那是 12.7MB。而各 tab 是用 `hidden` 隐藏而非条件卸载，所以本区块
+    // 在任何 tab 下都会 mount：无条件拉取等于每次进 Bot 配置页都后台补一发
+    // 12.7MB，把首屏的优化又吃回去。
+    //
+    // 所以按 `active` 延迟到 Cards tab 真正激活才拉。刻意**不用条件卸载**
+    // （`{active && <Section/>}`）：那会在切走 tab 时丢掉用户正在编辑的 JSON
+    // 草稿与开关状态。组件照常挂着，只是不发请求。
+    if (!props.active) return;
+    // ⚠️ 但把 `active` 加进依赖数组，副作用是**每次切回 Cards tab 都会重跑**
+    // （cards → common → 隔几秒回 cards，groups-api 的 3s 缓存已过期 ⟹ 又下载
+    // 12.7MB）。原语义是「每次 mount / 每个 botId 只拉一次」，延迟加载不该把它
+    // 放宽成「每次回 tab 都拉」。闸门把它收敛回每 bot 一次。
+    if (!chatsGateRef.current.claim(props.bot.larkAppId)) return;
+    const appId = props.bot.larkAppId;
     void fetchGroupsSnapshot().then(snapshot => {
-      setChats(snapshot.chats.filter(chat => chat.memberBots.some(member => member.larkAppId === props.bot.larkAppId && member.inChat)));
-    }).catch(() => setChats([]));
-  }, [props.bot.larkAppId]);
+      setChats(snapshot.chats.filter(chat => chat.memberBots.some(member => member.larkAppId === appId && member.inChat)));
+    }).catch(() => {
+      setChats([]);
+      // 失败释放认领：下次激活允许重试，否则一次网络抖动会让这个群列表在本 bot
+      // 上永久空着。
+      chatsGateRef.current.release(appId);
+    });
+  }, [props.bot.larkAppId, props.active]);
   async function save(nextOn = on): Promise<void> {
     setBusy(true); setStatus(null);
     try {
@@ -2828,12 +2854,14 @@ function workingDirState(bot: BotDefaultsRow): { mode: 'off' | 'default' | 'onca
   return { mode, workingDir: bot.defaultWorkingDir || def.workingDir || '' };
 }
 
-function AutoStartControls(props: { bot: BotDefaultsRow; putCardPref(patch: CardPrefPatch): Promise<JsonResponse> }) {
+export function AutoStartControls(props: { bot: BotDefaultsRow; putCardPref(patch: CardPrefPatch): Promise<JsonResponse> }) {
   const tr = useT();
   const { bot, putCardPref } = props;
   const [onJoin, setOnJoin] = useState(bot.autoStartOnGroupJoin === true);
   const [onTopic, setOnTopic] = useState(bot.autoStartOnNewTopic === true);
   const [prompt, setPrompt] = useState(typeof bot.autoStartOnGroupJoinPrompt === 'string' ? bot.autoStartOnGroupJoinPrompt : '');
+  // 编辑态软预填：未自定义时显示内置默认文案，只有点保存才落盘（空 = 跟随动态默认）。
+  const [seed, setSeed] = useState(bot.autoStartOnGroupJoinSeed || bot.autoStartOnGroupJoinSeedDefault || '');
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -2841,7 +2869,15 @@ function AutoStartControls(props: { bot: BotDefaultsRow; putCardPref(patch: Card
     setOnJoin(bot.autoStartOnGroupJoin === true);
     setOnTopic(bot.autoStartOnNewTopic === true);
     setPrompt(typeof bot.autoStartOnGroupJoinPrompt === 'string' ? bot.autoStartOnGroupJoinPrompt : '');
-  }, [bot.autoStartOnGroupJoin, bot.autoStartOnGroupJoinPrompt, bot.autoStartOnNewTopic]);
+    setSeed(bot.autoStartOnGroupJoinSeed || bot.autoStartOnGroupJoinSeedDefault || '');
+  }, [
+    bot.larkAppId,
+    bot.autoStartOnGroupJoin,
+    bot.autoStartOnGroupJoinPrompt,
+    bot.autoStartOnGroupJoinSeed,
+    bot.autoStartOnGroupJoinSeedDefault,
+    bot.autoStartOnNewTopic,
+  ]);
 
   async function savePatch(patch: CardPrefPatch, key: string): Promise<void> {
     setBusy(key);
@@ -2876,6 +2912,18 @@ function AutoStartControls(props: { bot: BotDefaultsRow; putCardPref(patch: Card
           <textarea data-input="autoJoinPrompt" rows={3} placeholder={tr('botDefaults.autoStartJoinPromptPlaceholder')} value={prompt} onChange={event => setPrompt(event.currentTarget.value)} />
         </label>
       </div>
+      <div className="bd-row">
+        <label>
+          <FieldTitle help={tr('botDefaults.autoStartJoinSeedHelp')}>{tr('botDefaults.autoStartJoinSeed')}</FieldTitle>
+          <textarea
+            data-input="autoJoinSeed"
+            rows={2}
+            placeholder={bot.autoStartOnGroupJoinSeedDefault || tr('botDefaults.autoStartJoinSeedPlaceholder')}
+            value={seed}
+            onChange={event => setSeed(event.currentTarget.value)}
+          />
+        </label>
+      </div>
       <ToggleRow
         checked={onTopic}
         disabled={busy === 'topic'}
@@ -2891,6 +2939,21 @@ function AutoStartControls(props: { bot: BotDefaultsRow; putCardPref(patch: Card
         <button type="button" className="primary" data-action="save-auto-join-prompt" disabled={busy === 'prompt'} onClick={() => void savePatch({ autoStartOnGroupJoinPrompt: prompt }, 'prompt')}>
           {tr('botDefaults.autoStartJoinPromptSave')}
         </button>
+        <button type="button" className="primary" data-action="save-auto-join-seed" disabled={busy === 'seed'} onClick={() => void savePatch({
+          autoStartOnGroupJoinSeed: seed,
+          // 一并回传「这个页面当时预填给用户看的那句默认」。服务端据此判断本次提交
+          // 是不是原样回存的软预填值——只跟服务端当刻默认比是不够的：页面拿到
+          // payload 之后 bot locale 可能已被改掉（/config lang 立即生效且不发
+          // bots.changed，本页不会重拉），此时软预填仍是旧语言那句。
+          autoStartOnGroupJoinSeedDefault: bot.autoStartOnGroupJoinSeedDefault ?? '',
+        }, 'seed')}>
+          {tr('botDefaults.autoStartJoinSeedSave')}
+        </button>
+        {bot.autoStartOnGroupJoinSeed ? (
+          <button type="button" data-action="reset-auto-join-seed" disabled={busy === 'seedreset'} onClick={() => void savePatch({ autoStartOnGroupJoinSeed: '' }, 'seedreset')}>
+            {tr('botDefaults.autoStartJoinSeedReset')}
+          </button>
+        ) : null}
         <StatusSpan status={status} attr={{ 'data-auto-start-status': '' }} />
       </div>
     </div>
@@ -3547,6 +3610,7 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
   const { bot, putCardPref } = props;
   const [usageDisplay, setUsageDisplay] = useState<'streaming' | 'footer' | 'off'>(bot.usageDisplay ?? 'streaming');
   const [disableStreaming, setDisableStreaming] = useState(bot.disableStreamingCard === true);
+  const [pinStreamingCard, setPinStreamingCard] = useState(bot.pinStreamingCard === true);
   const [silentReactions, setSilentReactions] = useState(bot.silentTurnReactions === true);
   const [writableLink, setWritableLink] = useState(bot.writableTerminalLinkInCard === true);
   const [privateCard, setPrivateCard] = useState(bot.privateCard === true);
@@ -3557,11 +3621,12 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
   useEffect(() => {
     setUsageDisplay(bot.usageDisplay ?? 'streaming');
     setDisableStreaming(bot.disableStreamingCard === true);
+    setPinStreamingCard(bot.pinStreamingCard === true);
     setSilentReactions(bot.silentTurnReactions === true);
     setWritableLink(bot.writableTerminalLinkInCard === true);
     setPrivateCard(bot.privateCard === true);
     setThinkingCard(bot.thinkingCard !== false);
-  }, [bot.disableStreamingCard, bot.privateCard, bot.thinkingCard, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
+  }, [bot.disableStreamingCard, bot.pinStreamingCard, bot.privateCard, bot.thinkingCard, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
 
   async function savePatch(patch: CardPrefPatch, key: string, rollback?: () => void): Promise<void> {
     setBusy(key);
@@ -3636,6 +3701,23 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
               const previous = thinkingCard;
               setThinkingCard(checked);
               void savePatch({ thinkingCard: checked }, 'thinking', () => setThinkingCard(previous));
+            }}
+          />
+          <ToggleRow
+            checked={pinStreamingCard}
+            disabled={busy !== null}
+            dataAction="toggle-pin-streaming-card"
+            title={tr('botDefaults.pinStreamingCard')}
+            description={tr('botDefaults.pinStreamingCardDescription')}
+            help={tr('botDefaults.pinStreamingCardHelp')}
+            onChange={checked => {
+              const previous = pinStreamingCard;
+              setPinStreamingCard(checked);
+              void savePatch(
+                { pinStreamingCard: checked },
+                'pin-streaming',
+                () => setPinStreamingCard(previous),
+              );
             }}
           />
         </section>

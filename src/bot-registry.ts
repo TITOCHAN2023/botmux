@@ -1772,6 +1772,14 @@ export interface BotConfig {
    */
   disableStreamingCard?: boolean;
   /**
+   * Pin the current public streaming card. Default false; best-effort only.
+   */
+  pinStreamingCard?: boolean;
+  /** chat_id list: chats where streaming-card Pin is disabled even when the
+   *  bot-level {@link pinStreamingCard} master switch is on. Written by
+   *  `/card pin off|on`. */
+  noPinStreamingCardChats?: string[];
+  /**
    * Stream the model's thinking process (CoT) into a native Feishu CoT
    * message per turn: a fixed-height scrolling bubble showing thinking
    * paragraphs and tool calls as nodes, auto-collapsing when the turn settles.
@@ -1876,6 +1884,15 @@ export interface BotConfig {
    */
   autoStartOnGroupJoinPrompt?: string;
   /**
+   * 主动开工 — 场景①自定义入群 seed 消息文案（该消息同时是话题根/共享会话锚点，
+   * 只在话题群 / 普通群 new-topic / shared 模式下发送；普通群顶层平铺入群静默）。
+   * 缺省/空白 → 按 bot locale 回退内置 i18n 文案（daemon.auto_start_join_seed）。
+   * bots.json 手配 + dashboard「Bot 默认设置」可编辑（card-prefs 链路，清空保存即
+   * 恢复默认）。注意 forcePrompt（Issue Board 领取）路径会跳过
+   * {@link autoStartOnGroupJoin} 开关检查，开关关闭时 seed 仍可能发出。
+   */
+  autoStartOnGroupJoinSeed?: string;
+  /**
    * 进群自动拉 owner。Default (undefined) = ON：本 bot 被加进任何群时，自动把
    * 自己的 owner（resolvedAllowedUsers 首个 ou_ 用户）拉进群——bot 应始终处于
    *  owner 可见的群里（不打黑工）。显式 false 关闭（如告警/oncall 类 bot 被
@@ -1937,6 +1954,17 @@ export interface BotConfig {
    * is the mode's defining behavior, not affected by this policy).
    */
   regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
+  /**
+   * 允许 `botmux send --mention` @ 群内任意成员（用完整邮箱 / 手机号 / union_id /
+   * open_id 指定），而不仅是本轮触发者（--mention-back）。默认 false：关闭时
+   * --mention 只接受字面 open_id，传入邮箱等非 open_id 标识会被拒绝，避免模型
+   * 自主决定 @ 谁时“乱发”。开启后：
+   *   1. --mention 的每个值先经 resolveAllowedUsersWithMap 解析成本 app open_id；
+   *   2. 解析结果再与目标群的成员列表（listChatMemberOpenIds）做交集校验，
+   *      只有确实在群里的人才会被 @，不在群里的直接拒绝发送。
+   * 是否开放由配置该 bot 的人决定。
+   */
+  allowArbitraryMention?: boolean;
   /**
    * Regular-group substitute trigger. When enabled, an @mention of one of the
    * configured people is treated as an address to this bot when the sender can
@@ -3281,11 +3309,21 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? undefined
         : normalizeUsageDisplay(entry),
       disableStreamingCard: entry.disableStreamingCard === true || undefined,
+      pinStreamingCard: entry.pinStreamingCard === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
       thinkingCard: entry.thinkingCard === false ? false : undefined,
       // Default ON, same convention as thinkingCard: an absent key means the
       // <sender> tag is injected, so existing prompts are unchanged.
       senderTag: entry.senderTag === false ? false : undefined,
+      noPinStreamingCardChats: Array.isArray(entry.noPinStreamingCardChats)
+        ? (() => {
+          const filtered = entry.noPinStreamingCardChats
+            .filter((x: any): x is string => typeof x === 'string' && x.trim().length > 0)
+            .map((x: string) => x.trim());
+          const normalized = Array.from(new Set<string>(filtered));
+          return normalized.length > 0 ? normalized : undefined;
+        })()
+        : undefined,
       noCotChats: Array.isArray(entry.noCotChats)
         ? entry.noCotChats.filter((x: any): x is string => typeof x === 'string' && x.trim().length > 0).map((x: string) => x.trim())
         : undefined,
@@ -3318,7 +3356,15 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       autoStartOnGroupJoinPrompt: typeof entry.autoStartOnGroupJoinPrompt === 'string' && entry.autoStartOnGroupJoinPrompt.trim()
         ? entry.autoStartOnGroupJoinPrompt
         : undefined,
+      // Preserve the configured seed verbatim; trim-to-undefined when blank
+      // so an empty string doesn't linger in bots.json.
+      autoStartOnGroupJoinSeed: typeof entry.autoStartOnGroupJoinSeed === 'string' && entry.autoStartOnGroupJoinSeed.trim()
+        ? entry.autoStartOnGroupJoinSeed
+        : undefined,
       autoStartOnNewTopic: entry.autoStartOnNewTopic === true || undefined,
+      // 默认 OFF：只有显式 true 有意义/落盘。开启后 `botmux send --mention`
+      // 才能用完整邮箱/手机号等标识 @ 群内任意成员（见 BotConfig 上的说明）。
+      allowArbitraryMention: entry.allowArbitraryMention === true || undefined,
       messageListeners,
       worktreeMultiPicker: entry.worktreeMultiPicker === true || undefined,
       // Per-bot regular-group default mode. Default is 'chat-topic' (顶层平铺
