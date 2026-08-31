@@ -392,6 +392,28 @@ describe('handleCotThinkingUpdate', () => {
     expect(bodyOf('S').language).toBeUndefined(); // not "bash"
   });
 
+  it('does not highlight search results by the pattern\'s extension', async () => {
+    const ds = makeDs();
+    handleCotThinkingUpdate(ds, upd([
+      // A pattern ending in an extension says what to FIND; the result is a
+      // match list, not a file of that type.
+      { kind: 'tool_call', id: 'G', name: 'Grep', args: JSON.stringify({ pattern: 'readme\\.md' }) },
+      { kind: 'tool_result', id: 'G', result: 'docs/readme.md:1:# Title' },
+      { kind: 'tool_call', id: 'B', name: 'Glob', args: JSON.stringify({ pattern: 'src/**/*.ts' }) },
+      { kind: 'tool_result', id: 'B', result: 'src/daemon.ts\nsrc/worker.ts' },
+    ]));
+    await flush();
+    const bodyOf = (id: string): any =>
+      JSON.parse(pushedEvents().find(e => e.type === 'TOOL_CALL_RESULT' && e.content.toolCallId === id)!.content.content);
+    const titleOf = (id: string): string =>
+      pushedEvents().find(e => e.type === 'TOOL_CALL_START' && e.content.toolCallId === id)!.content.title;
+    expect(bodyOf('G').language).toBeUndefined(); // not "markdown"
+    expect(bodyOf('B').language).toBeUndefined(); // not "typescript"
+    // The pattern still shows in the title — only the highlight is suppressed.
+    expect(titleOf('G')).toContain('readme');
+    expect(titleOf('B')).toContain('src/**/*.ts');
+  });
+
   it('bounds an overlong command so the title stays one readable line', async () => {
     const ds = makeDs();
     const long = `echo ${'x'.repeat(500)}`;

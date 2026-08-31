@@ -472,9 +472,11 @@ function resultLanguage(toolName: string | undefined, subject: string | undefine
   // `exec` is matched as a WHOLE word, not a substring: `execute_sql` /
   // `execute_python` are ordinary tools whose output is not shell.
   if (n.includes('bash') || n.includes('shell') || n.includes('command') || /(^|[^a-z])exec([^a-z]|$)/.test(n)) return 'bash';
-  // Fetch tools return a rendered page/summary, not the file the URL names —
-  // a `.json`/`.html` URL would otherwise mislabel prose as that language.
-  if (n.includes('fetch') || n.includes('search')) return undefined;
+  // Search/fetch tools return matches or a rendered page — never the file the
+  // subject names. Without this, a `.json` URL or a `readme\.md` grep pattern
+  // would label prose or match-lists as that language. Mirrors the same family
+  // that toolMeta groups under the search icon.
+  if (n.includes('fetch') || n.includes('search') || n.includes('grep') || n.includes('glob')) return undefined;
   // File tools: the subject is the path, so the extension names the language.
   const ext = subject?.match(/\.([A-Za-z0-9]+)\s*$/)?.[1]?.toLowerCase();
   return ext ? COT_EXT_LANGUAGES[ext] : undefined;
