@@ -1266,19 +1266,47 @@ ipcRoute('POST', '/api/sessions/:sessionId/prune', async (_req, res, params) => 
 // left cross-bot workers orphaned. Idempotent: re-running just closes nothing.
 ipcRoute('POST', '/api/goal/:goalChatId/cleanup-local', async (_req, res, params) => {
   const goalChatId = params.goalChatId;
-  if (!goalChatId) return jsonRes(res, 400, { closed: 0, error: 'missing_goal_chat' });
+  if (!goalChatId) return jsonRes(res, 400, {
+    closed: 0,
+    residual: 0,
+    failed: 0,
+    error: 'missing_goal_chat',
+  });
   const targets = listActiveSessions().filter(s => s.chatId === goalChatId && s.scope === 'chat');
   let closed = 0;
+  let residual = 0;
+  let failed = 0;
   for (const ds of targets) {
     try {
-      await closeSession(ds.session.sessionId);
+      const result = await closeSession(ds.session.sessionId);
+      if (!result.ok) {
+        failed++;
+        logger.warn(
+          `[goal-cleanup-local] close ${ds.session.sessionId} refused: ${result.error}`
+          + (result.taskId ? ` (remote ${result.taskId})` : ''),
+        );
+        continue;
+      }
       closed++;
+      if (result.outcome === 'closed_with_residual') {
+        residual++;
+        logger.warn(
+          `[goal-cleanup-local] close ${ds.session.sessionId} left residual: ${result.residual.reason}`
+          + (result.residual.taskId ? ` (remote ${result.residual.taskId})` : ''),
+        );
+      }
     } catch (err) {
+      failed++;
       logger.warn(`[goal-cleanup-local] close ${ds.session.sessionId} failed: ${err}`);
     }
   }
-  if (closed > 0) logger.info(`[goal-cleanup-local] closed ${closed} chat-scope sessions for goal=${goalChatId}`);
-  jsonRes(res, 200, { closed });
+  if (closed > 0 || failed > 0) {
+    logger.info(
+      `[goal-cleanup-local] closed ${closed} chat-scope sessions for goal=${goalChatId}; `
+      + `residual=${residual}; failed=${failed}`,
+    );
+  }
+  jsonRes(res, failed > 0 ? 502 : 200, { closed, residual, failed });
 });
 
 /** Post a scope-aware "restarting" notice into the session's Lark thread/chat,

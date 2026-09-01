@@ -2223,17 +2223,33 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           `http://127.0.0.1:${d.ipcPort}/api/goal/${encodeURIComponent(goalChatId)}/cleanup-local`,
           { method: 'POST', signal: ctrl.signal },
         );
-        const body = await r.json().catch(() => null) as { closed?: number } | null;
-        return typeof body?.closed === 'number' ? body.closed : 0;
+        const body = await r.json().catch(() => null) as {
+          closed?: number;
+          residual?: number;
+          failed?: number;
+        } | null;
+        if (!body || typeof body.closed !== 'number') {
+          return { closed: 0, residual: 0, failed: 1 };
+        }
+        return {
+          closed: body.closed,
+          residual: typeof body.residual === 'number' ? body.residual : 0,
+          failed: typeof body.failed === 'number' ? body.failed : (r.ok ? 0 : 1),
+        };
       } catch (err) {
         logger.warn(`[goal-cleanup] fanout to ${d.larkAppId}@${d.ipcPort} failed: ${err}`);
-        return 0;
+        return { closed: 0, residual: 0, failed: 1 };
       } finally {
         clearTimeout(tt);
       }
     }));
-    const closed = perDaemon.reduce((a, b) => a + b, 0);
-    logger.info(`[goal-cleanup] ${operatorOpenId ?? '?'} closed ${closed} chat-scope sessions across daemons for goal=${goalChatId}; registryClosed=${Boolean(closedRegistry)}`);
+    const closed = perDaemon.reduce((total, item) => total + item.closed, 0);
+    const residual = perDaemon.reduce((total, item) => total + item.residual, 0);
+    const failed = perDaemon.reduce((total, item) => total + item.failed, 0);
+    logger.info(
+      `[goal-cleanup] ${operatorOpenId ?? '?'} closed ${closed} chat-scope sessions across daemons `
+      + `for goal=${goalChatId}; residual=${residual}; failed=${failed}; registryClosed=${Boolean(closedRegistry)}`,
+    );
     // Narrate into the goal group so observers see the cleanup actually fired —
     // the sessions are gone, but the card is sent by the bot directly (not via a
     // session), so the goal group still gets a visible 🧹 marker.
@@ -2244,12 +2260,22 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         event: { type: 'cleanup', key: `narr:cleanup:${goalChatId}:${cardMessageId ?? closed}`, closed },
       }).catch(err => logger.warn(`[goal-cleanup] narration failed: ${err}`));
     }
+    const incomplete = residual > 0 || failed > 0;
+    const followUp = incomplete
+      ? `\n\n⚠️ 其中 **${residual}** 个会话仍有残留，**${failed}** 个会话关闭失败或 daemon 未响应，请继续人工处理。`
+      : '';
     return {
       config: { wide_screen_mode: true },
-      header: { template: 'green', title: { tag: 'plain_text', content: 'Goal 会话已清理' } },
+      header: {
+        template: incomplete ? 'orange' : 'green',
+        title: { tag: 'plain_text', content: incomplete ? 'Goal 会话清理需跟进' : 'Goal 会话已清理' },
+      },
       elements: [{
         tag: 'div',
-        text: { tag: 'lark_md', content: `已清理 **${closed}** 个 goal 群 chat-scope 会话（已覆盖全部 bot/daemon）。\n\n已停止该 goal 的自动恢复；Goal 群保留，不退群、不删群。` },
+        text: {
+          tag: 'lark_md',
+          content: `已本地关闭 **${closed}** 个 goal 群 chat-scope 会话。${followUp}\n\n已停止该 goal 的自动恢复；Goal 群保留，不退群、不删群。`,
+        },
       }],
     };
   }

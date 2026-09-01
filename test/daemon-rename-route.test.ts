@@ -2166,20 +2166,27 @@ describe('/rename production routing — must not pre-create a session (review P
   });
 
   it('thread safety-net: passes the accepted reply id into the first worker', async () => {
-    registerBot({
-      larkAppId: APP,
-      larkAppSecret: 's',
-      cliId: 'claude-code',
-      allowedUsers: [OWNER],
-      defaultWorkingDir: '/tmp',
-    }).resolvedAllowedUsers = [OWNER];
-    await handleThreadReply(
-      makeEventData('om_workflow_reply', '/workflow new 修复首轮授权', 'om_fresh_root'),
-      makeCtx('om_fresh_root', 'om_workflow_reply'),
-    );
+    process.env.BOTMUX_WORKFLOW_ENABLED = 'true';
+    try {
+      registerBot({
+        larkAppId: APP,
+        larkAppSecret: 's',
+        cliId: 'claude-code',
+        allowedUsers: [OWNER],
+        defaultWorkingDir: '/tmp',
+      }).resolvedAllowedUsers = [OWNER];
+      await handleThreadReply(
+        makeEventData('om_workflow_reply', '/workflow new 修复首轮授权', 'om_fresh_root'),
+        makeCtx('om_fresh_root', 'om_workflow_reply'),
+      );
 
-    expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
-    expect(mocks.forkWorker.mock.calls[0]?.[2]).toEqual({ turnId: 'om_workflow_reply' });
+      expect(mocks.forkWorker).toHaveBeenCalledTimes(1);
+      expect(mocks.forkWorker.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+        turnId: 'om_workflow_reply',
+      }));
+    } finally {
+      delete process.env.BOTMUX_WORKFLOW_ENABLED;
+    }
   });
 
   it('live passthrough binds raw input and reply metadata to the accepted message', async () => {

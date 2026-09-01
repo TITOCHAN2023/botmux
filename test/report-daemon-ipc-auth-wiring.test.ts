@@ -32,7 +32,7 @@ describe('botmux report daemon IPC auth wiring', () => {
     expect(sanitize).toBeLessThan(source.indexOf('if (!content.trim())'));
     expect(sanitize).toBeLessThan(source.indexOf('report: content'));
     expect(sanitize).toBeLessThan(source.indexOf('body: { dispatchRoot: dispatchRootCandidate, content }'));
-    expect(sanitize).toBeLessThan(source.indexOf('const paras = buildReportContent({ orchOpenId: reportRecipient, content });'));
+    expect(sanitize).toBeLessThan(source.indexOf('const paras = buildReportContent({'));
   });
 
   it('routes through the authenticated source daemon when the host secret is available', () => {
