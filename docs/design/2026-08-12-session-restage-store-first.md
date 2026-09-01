@@ -2,10 +2,10 @@
 title: Session 终态：非分布式 virtual actor（持久化仅 SQLite）
 type: design
 date: 2026-08-12
-updated: 2026-08-28（面向终态重写；补齐删除条件、所有权探测口径与沙盒调用方例外）
+updated: 2026-09-01（rebase 到 origin/master@7bd2e974；基线含 #852 / #1073 / #1093）
 topic: session-virtual-actor
 status: active
-baseline: origin/master@cc5085b6（含已合入的 #852）；#1051 删除 daemon 侧 JSON 写路径（进行中）
+baseline: origin/master@7bd2e974（含已合入的 #852、#1073 导入 WAL 空壳、#1093 中毒库恢复）；#1051 删除 daemon 侧 JSON 写路径（进行中）
 references:
   - PR #846（会话行唯一写入入口）
   - PR #852（per-bot SQLite + JSON 导入 + 混合窗口；已合入 master）
