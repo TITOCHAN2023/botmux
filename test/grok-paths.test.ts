@@ -2,7 +2,7 @@
  * Unit tests for Grok cwd bucket resolution (HOME symlink / getcwd mismatch).
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, symlinkSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -11,7 +11,10 @@ import {
   resolveGrokCwdBucketDir,
 } from '../src/services/grok-paths.js';
 
-const ROOT = join(tmpdir(), `botmux-grok-paths-${process.pid}`);
+// tmpdir() itself is a symlink on macOS (/var → /private/var); canonicalize so
+// the scaffold's own root is not a confounder when asserting symlink
+// normalization (see test/claude-code-cwd.test.ts).
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), 'botmux-grok-paths-')));
 const itPosix = it.skipIf(process.platform === 'win32');
 
 describe('resolveGrokCwdBucketDir / symlink cwd', () => {
@@ -83,6 +86,13 @@ describe('resolveGrokCwdBucketDir / symlink cwd', () => {
 
     expect(resolveGrokCwdBucketDir(logicalCwd)).toBe(physicalBucket);
     expect(existsSync(grokPromptHistoryPath(logicalCwd))).toBe(true);
+  });
+
+  it('keeps a trailing space when predicting a not-yet-created bucket', () => {
+    const cwd = join(ROOT, 'proj') + ' ';
+    expect(resolveGrokCwdBucketDir(cwd)).toBe(
+      join(ROOT, 'sessions', encodeGrokCwd(cwd)),
+    );
   });
 
   itPosix('does not let an empty encoded dir shadow a hashed bucket with prompt_history', () => {

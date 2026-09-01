@@ -65,19 +65,19 @@ export function encodeGrokCwd(cwd: string): string {
 
 /** Physical path Grok's getcwd() would report; original cwd if realpath fails. */
 function canonicalizeGrokCwd(cwd: string): string {
-  const trimmed = cwd.trim();
-  if (!trimmed) return cwd;
+  // trim() only tests emptiness — POSIX directory names may end in spaces.
+  if (!cwd.trim()) return cwd;
   try {
-    return realpathSync(trimmed);
+    return realpathSync(cwd);
   } catch {
-    return trimmed;
+    return cwd;
   }
 }
 
 function grokCwdVariants(cwd: string): string[] {
-  const raw = cwd.trim() || cwd;
-  const canonical = canonicalizeGrokCwd(raw);
-  return canonical === raw ? [raw] : [raw, canonical];
+  if (!cwd.trim()) return [cwd];
+  const canonical = canonicalizeGrokCwd(cwd);
+  return canonical === cwd ? [cwd] : [cwd, canonical];
 }
 
 function grokCwdMatchesMarker(marker: string, cwd: string): boolean {
@@ -113,11 +113,11 @@ function collectHashedBucketDirs(root: string, variants: string[]): string[] {
 /**
  * Resolve the on-disk sessions bucket directory for `cwd`.
  *
- * 1. Collect encoded dirs for `cwd` and realpath(cwd), plus hashed buckets
- *    whose `.cwd` matches either. Prefer a hit that already has
- *    prompt_history.jsonl so an empty logical encoded dir cannot shadow
- *    Grok's physical / hashed bucket.
- * 2. Else the first existing encoded dir, then the first hashed match.
+ * 1. Encoded dirs for `cwd` / realpath(cwd) that already have
+ *    prompt_history.jsonl return immediately. Empty encoded dirs continue
+ *    so they cannot shadow a physical / hashed bucket that has history.
+ * 2. Else hashed buckets whose `.cwd` matches either; then the first
+ *    existing encoded dir, then the first hashed match.
  * 3. If nothing exists yet, return the encoded physical path Grok will
  *    create from getcwd(); fall back to encoding `cwd` when realpath fails.
  */
@@ -128,7 +128,12 @@ export function resolveGrokCwdBucketDir(cwd: string): string {
   const encodedHits: string[] = [];
   for (const candidate of variants) {
     const dir = join(root, encodeGrokCwd(candidate));
-    if (existsSync(dir)) encodedHits.push(dir);
+    if (!existsSync(dir)) continue;
+    // Encoded dir with prompt_history is already the best hit — skip the
+    // hashed-bucket scan (empty dirs still fall through so they cannot
+    // shadow a physical / hashed bucket that actually has history).
+    if (grokBucketHasPromptHistory(dir)) return dir;
+    encodedHits.push(dir);
   }
   const hashedHits = collectHashedBucketDirs(root, variants);
   const withHistory = [...encodedHits, ...hashedHits].find(grokBucketHasPromptHistory);
