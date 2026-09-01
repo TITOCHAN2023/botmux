@@ -21,8 +21,32 @@ vi.mock('node:child_process', () => {
 });
 
 import { spawnSync } from 'node:child_process';
+import type { SpawnSyncReturns } from 'node:child_process';
 
 const spawnSyncMock = vi.mocked(spawnSync);
+
+/**
+ * A complete `SpawnSyncReturns<string>`, so the literals below typecheck.
+ *
+ * WHY THIS APPEARED: the mock used to be an untyped `vi.fn()`, so a partial
+ * literal was invisible to tsc. `vi.mocked(spawnSync)` inherits the REAL
+ * signature, which requires `pid`/`output`/`signal` too. The fields are filled
+ * with inert values — no assertion reads them; only `status`/`stdout`/`stderr`
+ * (and `error`) drive the code under test.
+ *
+ * NOT widened to `as any`: the whole point of `vi.mocked` here is that a wrong
+ * payload shape becomes a compile error rather than a runtime surprise.
+ */
+function spawnResult(
+  partial: Partial<SpawnSyncReturns<string>> & Pick<SpawnSyncReturns<string>, 'status' | 'stdout' | 'stderr'>,
+): SpawnSyncReturns<string> {
+  return {
+    pid: 0,
+    output: [null, partial.stdout, partial.stderr],
+    signal: null,
+    ...partial,
+  };
+}
 
 import {
   fetchMeetingEventsAsBot,
@@ -35,7 +59,7 @@ describe('vc agent polling source process bounds', () => {
   });
 
   it('passes an explicit timeout to synchronous lark-cli execution', () => {
-    spawnSyncMock.mockReturnValue({ status: 0, stdout: '{}', stderr: '' });
+    spawnSyncMock.mockReturnValue(spawnResult({ status: 0, stdout: '{}', stderr: '' }));
 
     expect(runLarkCliJson(['vc', '+meeting-events'], { timeoutMs: 12_345 })).toEqual({});
     expect(spawnSyncMock).toHaveBeenCalledWith('lark-cli', ['vc', '+meeting-events'], expect.objectContaining({
@@ -46,18 +70,18 @@ describe('vc agent polling source process bounds', () => {
 
   it('reports a bounded timeout instead of treating it as an ordinary exit', () => {
     const error = Object.assign(new Error('spawnSync lark-cli ETIMEDOUT'), { code: 'ETIMEDOUT' });
-    spawnSyncMock.mockReturnValue({ status: null, stdout: '', stderr: '', error });
+    spawnSyncMock.mockReturnValue(spawnResult({ status: null, stdout: '', stderr: '', error }));
 
     expect(() => runLarkCliJson(['vc', '+meeting-events'], { timeoutMs: 500 }))
       .toThrow('timed out after 500ms');
   });
 
   it('forwards the restore timeout through meeting event polling', () => {
-    spawnSyncMock.mockReturnValue({
+    spawnSyncMock.mockReturnValue(spawnResult({
       status: 0,
       stdout: JSON.stringify({ meeting: { id: 'm1' }, events: [] }),
       stderr: '',
-    });
+    }));
 
     expect(fetchMeetingEventsAsBot({ meetingId: 'm1', timeoutMs: 7_000 }).batch.meeting.id).toBe('m1');
     expect(spawnSyncMock).toHaveBeenCalledWith('lark-cli', expect.arrayContaining([
