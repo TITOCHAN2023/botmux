@@ -9,11 +9,9 @@
  *     …
  *   $GROK_HOME/sessions/<url-encoded-cwd>/prompt_history.jsonl
  *     — bucket-level submit log: one `{timestamp, session_id, prompt, is_bash}`
- *       line PER SUBMIT, written at submit time even while a turn is running
- *       (verified on grok 0.2.93). The submit-verify source of truth — the
- *       per-session updates.jsonl only records a type-ahead user message at
- *       DEQUEUE time (after the running turn finishes), so it cannot confirm
- *       a busy-turn submit.
+ *       line per submit. Submit-verify reads this file. Grok 1.0.x writes a
+ *       type-ahead follow-up at dequeue, and may omit the line; updates.jsonl
+ *       has the same timing, so neither can confirm a busy-turn submit.
  *   $GROK_HOME/sessions/session_search.sqlite
  *   $GROK_HOME/skills/
  *   $GROK_HOME/hooks/
@@ -66,7 +64,7 @@ export function encodeGrokCwd(cwd: string): string {
 }
 
 /** Physical path Grok's getcwd() would report; original cwd if realpath fails. */
-export function canonicalizeGrokCwd(cwd: string): string {
+function canonicalizeGrokCwd(cwd: string): string {
   const trimmed = cwd.trim();
   if (!trimmed) return cwd;
   try {
@@ -88,13 +86,38 @@ function grokCwdMatchesMarker(marker: string, cwd: string): boolean {
   return canonicalizeGrokCwd(markerTrim) === canonicalizeGrokCwd(cwd);
 }
 
+function grokBucketHasPromptHistory(dir: string): boolean {
+  return existsSync(join(dir, 'prompt_history.jsonl'));
+}
+
+function collectHashedBucketDirs(root: string, variants: string[]): string[] {
+  const hits: string[] = [];
+  if (!existsSync(root)) return hits;
+  try {
+    for (const name of readdirSync(root)) {
+      if (name.endsWith('.sqlite') || name.endsWith('.lock')) continue;
+      const dir = join(root, name);
+      const marker = join(dir, '.cwd');
+      if (!existsSync(marker)) continue;
+      try {
+        const raw = readFileSync(marker, 'utf8').replace(/\r?\n$/, '');
+        if (variants.some((candidate) => grokCwdMatchesMarker(raw, candidate))) {
+          hits.push(dir);
+        }
+      } catch { /* ignore unreadable marker */ }
+    }
+  } catch { /* ignore unreadable root */ }
+  return hits;
+}
+
 /**
  * Resolve the on-disk sessions bucket directory for `cwd`.
  *
- * 1. Prefer the URL-encoded name for `cwd` itself, then for realpath(cwd),
- *    when that directory already exists (covers HOME-symlink hosts).
- * 2. Otherwise scan for a hashed bucket whose `.cwd` file equals `cwd` or
- *    realpath(cwd) (Grok's path when encoded name would exceed 255 bytes).
+ * 1. Collect encoded dirs for `cwd` and realpath(cwd), plus hashed buckets
+ *    whose `.cwd` matches either. Prefer a hit that already has
+ *    prompt_history.jsonl so an empty logical encoded dir cannot shadow
+ *    Grok's physical / hashed bucket.
+ * 2. Else the first existing encoded dir, then the first hashed match.
  * 3. If nothing exists yet, return the encoded physical path Grok will
  *    create from getcwd(); fall back to encoding `cwd` when realpath fails.
  */
@@ -102,26 +125,16 @@ export function resolveGrokCwdBucketDir(cwd: string): string {
   const root = grokSessionsRoot();
   const variants = grokCwdVariants(cwd);
 
+  const encodedHits: string[] = [];
   for (const candidate of variants) {
-    const preferred = join(root, encodeGrokCwd(candidate));
-    if (existsSync(preferred)) return preferred;
+    const dir = join(root, encodeGrokCwd(candidate));
+    if (existsSync(dir)) encodedHits.push(dir);
   }
-
-  if (existsSync(root)) {
-    try {
-      for (const name of readdirSync(root)) {
-        if (name.endsWith('.sqlite') || name.endsWith('.lock')) continue;
-        const marker = join(root, name, '.cwd');
-        if (!existsSync(marker)) continue;
-        try {
-          const raw = readFileSync(marker, 'utf8').replace(/\r?\n$/, '');
-          if (variants.some((candidate) => grokCwdMatchesMarker(raw, candidate))) {
-            return join(root, name);
-          }
-        } catch { /* ignore unreadable marker */ }
-      }
-    } catch { /* ignore unreadable root */ }
-  }
+  const hashedHits = collectHashedBucketDirs(root, variants);
+  const withHistory = [...encodedHits, ...hashedHits].find(grokBucketHasPromptHistory);
+  if (withHistory) return withHistory;
+  if (encodedHits.length > 0) return encodedHits[0];
+  if (hashedHits.length > 0) return hashedHits[0];
   return join(root, encodeGrokCwd(canonicalizeGrokCwd(cwd)));
 }
 
