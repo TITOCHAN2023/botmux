@@ -24,12 +24,18 @@
  * helpers resolve via {@link resolveGrokCwdBucketDir} so prompt_history /
  * session dirs stay correct for long / CJK working directories.
  *
+ * Grok names buckets from getcwd() (the physical path). Botmux often holds
+ * the logical cwd — HOME is a symlink on some hosts (`/home/user` →
+ * `/data00/home/user`). Resolve both encodings so submit-verify can find
+ * prompt_history.jsonl; otherwise writeInput fail-closes for 20s with
+ * submit_unconfirmed even though Enter already landed.
+ *
  * GROK_HOME is process-level only (daemon env / shell). Per-bot `env.GROK_HOME`
  * is reserved — botmux installs hooks/skills and drains transcripts under the
  * daemon-resolved home; injecting a different home into the CLI only would
  * split-brain (see per-bot-env RESERVED_ENV_KEYS).
  */
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -59,21 +65,47 @@ export function encodeGrokCwd(cwd: string): string {
   return encodeURIComponent(cwd);
 }
 
+/** Physical path Grok's getcwd() would report; original cwd if realpath fails. */
+export function canonicalizeGrokCwd(cwd: string): string {
+  const trimmed = cwd.trim();
+  if (!trimmed) return cwd;
+  try {
+    return realpathSync(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function grokCwdVariants(cwd: string): string[] {
+  const raw = cwd.trim() || cwd;
+  const canonical = canonicalizeGrokCwd(raw);
+  return canonical === raw ? [raw] : [raw, canonical];
+}
+
+function grokCwdMatchesMarker(marker: string, cwd: string): boolean {
+  const markerTrim = marker.trim();
+  if (marker === cwd || markerTrim === cwd) return true;
+  return canonicalizeGrokCwd(markerTrim) === canonicalizeGrokCwd(cwd);
+}
+
 /**
  * Resolve the on-disk sessions bucket directory for `cwd`.
  *
- * 1. Prefer the normal URL-encoded name when that directory already exists.
- * 2. Otherwise scan for a hashed bucket whose `.cwd` file equals `cwd`
- *    (Grok's path when encoded name would exceed 255 bytes).
- * 3. If nothing exists yet, return the preferred encoded path (Grok will
- *    create it for short paths; long paths only appear after TUI startup,
- *    at which point step 2 finds the hashed group).
+ * 1. Prefer the URL-encoded name for `cwd` itself, then for realpath(cwd),
+ *    when that directory already exists (covers HOME-symlink hosts).
+ * 2. Otherwise scan for a hashed bucket whose `.cwd` file equals `cwd` or
+ *    realpath(cwd) (Grok's path when encoded name would exceed 255 bytes).
+ * 3. If nothing exists yet, return the encoded physical path Grok will
+ *    create from getcwd(); fall back to encoding `cwd` when realpath fails.
  */
 export function resolveGrokCwdBucketDir(cwd: string): string {
   const root = grokSessionsRoot();
-  const encoded = encodeGrokCwd(cwd);
-  const preferred = join(root, encoded);
-  if (existsSync(preferred)) return preferred;
+  const variants = grokCwdVariants(cwd);
+
+  for (const candidate of variants) {
+    const preferred = join(root, encodeGrokCwd(candidate));
+    if (existsSync(preferred)) return preferred;
+  }
 
   if (existsSync(root)) {
     try {
@@ -83,13 +115,14 @@ export function resolveGrokCwdBucketDir(cwd: string): string {
         if (!existsSync(marker)) continue;
         try {
           const raw = readFileSync(marker, 'utf8').replace(/\r?\n$/, '');
-          // Grok writes the absolute cwd; tolerate a trailing newline only.
-          if (raw === cwd || raw.trim() === cwd) return join(root, name);
+          if (variants.some((candidate) => grokCwdMatchesMarker(raw, candidate))) {
+            return join(root, name);
+          }
         } catch { /* ignore unreadable marker */ }
       }
     } catch { /* ignore unreadable root */ }
   }
-  return preferred;
+  return join(root, encodeGrokCwd(canonicalizeGrokCwd(cwd)));
 }
 
 export function grokSessionDir(sessionId: string, cwd: string): string {
