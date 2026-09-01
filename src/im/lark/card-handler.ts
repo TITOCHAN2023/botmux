@@ -113,10 +113,14 @@ import {
   normalizeTraexInitializationMode,
   type TraexInitializationSelection,
 } from '../../core/traex-initialization.js';
+import { checkForgeTraexStartupAvailability } from '../../core/forge-availability.js';
 import {
+  buildTraexInitializationCard,
   buildTraexInitializationCancelledCard,
   TRAEX_INIT_ACTION_CANCEL,
+  TRAEX_INIT_ACTION_MANUAL_SELECT,
   TRAEX_INIT_ACTION_START,
+  TRAEX_INIT_ACTION_WORKTREE_MULTI_SELECT,
   TRAEX_INIT_KEY_MODE,
   TRAEX_INIT_KEY_TARGET,
 } from './traex-initialization-card.js';
@@ -1704,7 +1708,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     );
   }
 
-  const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'repo_manual_submit', 'repo_worktree_submit', 'worktree_toggle_mode', TRAEX_INIT_ACTION_START, TRAEX_INIT_ACTION_CANCEL, 'retry_last_task', 'get_write_link', 'open_local_terminal', 'open_local_cli', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);
+  const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'repo_manual_submit', 'repo_worktree_submit', 'worktree_toggle_mode', TRAEX_INIT_ACTION_START, TRAEX_INIT_ACTION_CANCEL, TRAEX_INIT_ACTION_MANUAL_SELECT, TRAEX_INIT_ACTION_WORKTREE_MULTI_SELECT, 'retry_last_task', 'get_write_link', 'open_local_terminal', 'open_local_cli', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);
   if (isSensitive) {
     const rootId = value?.root_id;
     // activeSessions is keyed by sessionKey(anchor, larkAppId) — `${anchor}::${larkAppId}`
@@ -1735,7 +1739,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         || value.action === 'repo_manual_submit'
         || value.action === 'repo_worktree_submit'
         || value.action === TRAEX_INIT_ACTION_START
-        || value.action === TRAEX_INIT_ACTION_CANCEL) && !!ds?.pendingRepo &&
+        || value.action === TRAEX_INIT_ACTION_CANCEL
+        || value.action === TRAEX_INIT_ACTION_MANUAL_SELECT
+        || value.action === TRAEX_INIT_ACTION_WORKTREE_MULTI_SELECT) && !!ds?.pendingRepo &&
       !!operatorOpenId && operatorOpenId === ds.session.ownerOpenId;
     if (effectiveAppId) {
       if (!pendingRepoOwnerException && !canOperate(effectiveAppId, chatId, operatorOpenId)) {
@@ -1827,6 +1833,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       if (!mode) {
         return { toast: { type: 'error', content: t('card.traex_init.expired', undefined, loc) } };
       }
+      if (mode !== 'traex' && !checkForgeTraexStartupAvailability().available) {
+        pending.mode = 'traex';
+        return { toast: { type: 'error', content: t('card.traex_init.forge_unavailable', undefined, loc) } };
+      }
       pending.mode = mode;
       return { toast: { type: 'success', content: t('card.traex_init.mode_selected', undefined, loc) } };
     }
@@ -1843,6 +1853,84 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       ? resolved.selection.label
       : resolved.selection.path;
     return { toast: { type: 'success', content: t(key, { path: label, name: label }, loc) } };
+  }
+
+  if (
+    value?.action === TRAEX_INIT_ACTION_MANUAL_SELECT
+    || value?.action === TRAEX_INIT_ACTION_WORKTREE_MULTI_SELECT
+  ) {
+    const rootId = value.root_id;
+    const ds = rootId && larkAppId
+      ? getSessionByActionValue(activeSessions, rootId, larkAppId, value.session_id, value.action)
+      : undefined;
+    const loc = localeForBot(ds?.larkAppId ?? larkAppId);
+    const pending = ds?.pendingTraexInitialization;
+    if (!ds || !pending || pending.nonce !== value.nonce || !ds.pendingRepo) {
+      return { toast: { type: 'warning', content: t('card.traex_init.expired', undefined, loc) } };
+    }
+    if (!operatorOpenId || operatorOpenId !== pending.ownerOpenId || operatorOpenId !== ds.session.ownerOpenId) {
+      return { toast: { type: 'warning', content: t('card.traex_init.owner_only', undefined, loc) } };
+    }
+    if (cardMessageId && !isActiveRepoCard(ds, cardMessageId)) {
+      return { toast: { type: 'warning', content: t('card.traex_init.expired', undefined, loc) } };
+    }
+    if (pending.commitInFlight || ds.pendingRepoCommitInFlight || ds.worktreeCreating) {
+      return { toast: { type: 'info', content: t('card.traex_init.in_progress', undefined, loc) } };
+    }
+
+    if (value.action === TRAEX_INIT_ACTION_MANUAL_SELECT) {
+      const rawPath = typeof action?.form_value?.traex_init_manual_path === 'string'
+        ? action.form_value.traex_init_manual_path.trim()
+        : '';
+      if (!rawPath) {
+        return { toast: { type: 'error', content: t('card.repo.manual_empty', undefined, loc) } };
+      }
+      const validation = validateWorkingDir(rawPath, loc);
+      if (!validation.ok) {
+        return { toast: { type: 'error', content: validation.error } };
+      }
+      pending.selection = {
+        kind: 'directory',
+        path: validation.resolvedPath,
+        label: validation.resolvedPath,
+        pinWorkingDir: true,
+      };
+      return { toast: { type: 'success', content: t('card.traex_init.repo_selected', { path: validation.resolvedPath }, loc) } };
+    }
+
+    const selectedPaths = stringListFromLarkMultiSelect(action?.form_value?.repo_worktree_paths);
+    if (selectedPaths.length === 0) {
+      return { toast: { type: 'error', content: t('card.repo.worktree_empty', undefined, loc) } };
+    }
+    const projects = lastRepoScan.get(ds.chatId) ?? [];
+    const selectedRepos = selectedPaths.map(repoPath => projects.find(p => p.path === repoPath && p.type === 'repo'));
+    if (selectedRepos.some(project => !project)) {
+      return { toast: { type: 'error', content: t('card.traex_init.repo_not_found', undefined, loc) } };
+    }
+    const branch = String(action?.form_value?.repo_worktree_branch ?? '').trim() || undefined;
+    const multiParent = selectedPaths.length > 1
+      ? multiWorktreeParentPath(
+          selectedPaths,
+          branch ?? await worktreeSlugFromContextAI(ds.session.title, pending.originalPrompt) ?? 'worktree',
+        )
+      : undefined;
+    if (multiParent) {
+      const duplicateNames = duplicateMultiWorktreeChildNames(selectedPaths, projects);
+      if (duplicateNames.length > 0) {
+        return { toast: { type: 'error', content: t('card.repo.worktree_child_conflict', { names: duplicateNames.join(', ') }, loc) } };
+      }
+    }
+    const label = selectedRepos
+      .map((project, index) => project?.name ?? pathBasename(selectedPaths[index] ?? ''))
+      .join(', ');
+    pending.selection = {
+      kind: 'worktree',
+      repoPaths: selectedPaths,
+      label,
+      ...(branch ? { branch } : {}),
+      ...(multiParent ? { parentPath: multiParent } : {}),
+    };
+    return { toast: { type: 'success', content: t('card.traex_init.worktree_selected', { name: label }, loc) } };
   }
 
   if (value?.action && (
@@ -1889,6 +1977,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     if (!mode) {
       return { toast: { type: 'error', content: t('card.traex_init.expired', undefined, loc) } };
     }
+    if (mode !== 'traex' && !checkForgeTraexStartupAvailability().available) {
+      pending.mode = 'traex';
+      delete ds.session.traexForgeMode;
+      sessionStore.updateSession(ds.session);
+      return { toast: { type: 'error', content: t('card.traex_init.forge_unavailable', undefined, loc) } };
+    }
     if (!normalizedPrompt.ok) {
       const key = normalizedPrompt.error === 'empty'
         ? 'card.traex_init.prompt_empty'
@@ -1923,6 +2017,9 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     }
 
     pending.mode = mode;
+    if (mode === 'traex') delete ds.session.traexForgeMode;
+    else ds.session.traexForgeMode = mode;
+    sessionStore.updateSession(ds.session);
     ds.pendingPrompt = pending.promptPrefix + buildTraexInitializationPrompt(mode, normalizedPrompt.prompt);
     ds.pendingCodexAppText = buildTraexInitializationPrompt(mode, normalizedPrompt.prompt);
     pending.originalPrompt = normalizedPrompt.prompt;
@@ -2996,7 +3093,24 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       // await so a rejected delete is caught here (not an unhandled rejection);
       // a missing/already-gone card is fine — we post the fresh one regardless.
       if (ds.repoCardMessageId && ds.larkAppId) { try { await deleteMessage(ds.larkAppId, ds.repoCardMessageId); } catch { /* card already gone */ } }
-      const newCard = buildRepoSelectCard(projects, getSessionWorkingDir(ds), rootId, locDs, next);
+      const forgeAvailability = checkForgeTraexStartupAvailability();
+      if (ds.pendingTraexInitialization && !forgeAvailability.available) {
+        ds.pendingTraexInitialization.mode = 'traex';
+        if (ds.session.traexForgeMode) {
+          delete ds.session.traexForgeMode;
+          sessionStore.updateSession(ds.session);
+        }
+      }
+      const newCard = ds.pendingTraexInitialization
+        ? buildTraexInitializationCard({
+            rootId,
+            pending: ds.pendingTraexInitialization,
+            projects,
+            locale: locDs,
+            multiPicker: next,
+            forgeAvailable: forgeAvailability.available,
+          })
+        : buildRepoSelectCard(projects, getSessionWorkingDir(ds), rootId, locDs, next);
       ds.repoCardMessageId = await sessionReply(rootId, newCard, 'interactive');
       return { toast: { type: 'info', content: t(next ? 'card.repo.toast_worktree_mode_switched' : 'card.repo.toast_worktree_mode_switched_back', undefined, locDs) } };
     }

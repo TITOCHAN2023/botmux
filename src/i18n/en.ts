@@ -103,6 +103,7 @@ export const messages: Record<string, string> = {
   'card.traex_init.in_progress': 'The session is already being initialized',
   'card.traex_init.repo_not_found': 'The selected repository no longer exists. Choose again.',
   'card.traex_init.mode_selected': 'Startup mode selected',
+  'card.traex_init.forge_unavailable': 'Forge is not installed on this machine, or forge doctor reports blocking errors. Forge startup modes are unavailable.',
   'card.traex_init.repo_selected': 'Working directory selected: {path}',
   'card.traex_init.worktree_selected': 'A new worktree will be created from {name}',
   'card.traex_init.cancelled_title': 'Initialization cancelled',

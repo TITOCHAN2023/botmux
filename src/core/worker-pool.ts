@@ -3751,6 +3751,9 @@ export function forkWorker(
     cliId: agentCfg.cliId,
     cliPathOverride: agentCfg.cliPathOverride,
     wrapperCli: agentCfg.wrapperCli,
+    ...(agentCfg.cliId === 'traex' && ds.session.traexForgeMode
+      ? { traexForgeMode: ds.session.traexForgeMode }
+      : {}),
     launchShell: botCfg.launchShell,
     model: agentCfg.model,
     reasoningEffort: agentCfg.reasoningEffort,

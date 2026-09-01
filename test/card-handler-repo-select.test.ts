@@ -124,6 +124,10 @@ vi.mock('../src/services/default-worktree.js', () => ({
   maybeCreateDefaultWorktree: vi.fn(async (_appId: string, baseDir: string) => ({ dir: `${baseDir}-wt` })),
 }));
 
+vi.mock('../src/core/forge-availability.js', () => ({
+  checkForgeTraexStartupAvailability: vi.fn(() => ({ available: true })),
+}));
+
 vi.mock('@larksuiteoapi/node-sdk', () => ({
   Client: class { constructor() {} },
   WSClient: class { start() {} },
@@ -140,6 +144,7 @@ import { getBot } from '../src/bot-registry.js';
 import { createSession, closeSession, updateSession } from '../src/services/session-store.js';
 import { createRepoWorktree, pushWorktreeBranch, removeRepoWorktree } from '../src/services/git-worktree.js';
 import { maybeCreateDefaultWorktree } from '../src/services/default-worktree.js';
+import { checkForgeTraexStartupAvailability } from '../src/core/forge-availability.js';
 import { applyConfigField } from '../src/services/bot-config-store.js';
 import { deleteMessage } from '../src/im/lark/client.js';
 import { canOperate } from '../src/im/lark/event-dispatcher.js';
@@ -287,6 +292,31 @@ function makeTraexSelectEvent(
   };
 }
 
+function makeTraexManualSelectEvent(path: string, operator = OWNER) {
+  return {
+    operator: { open_id: operator },
+    action: {
+      value: { action: 'traex_init_manual_select', root_id: ROOT_ID, nonce: 'nonce-traex' },
+      form_value: { traex_init_manual_path: path },
+    },
+    context: { open_message_id: 'om_card' },
+  };
+}
+
+function makeTraexWorktreeMultiSelectEvent(paths: string[], branch = '', operator = OWNER) {
+  return {
+    operator: { open_id: operator },
+    action: {
+      value: { action: 'traex_init_worktree_multi_select', root_id: ROOT_ID, nonce: 'nonce-traex' },
+      form_value: {
+        repo_worktree_paths: paths,
+        repo_worktree_branch: branch,
+      },
+    },
+    context: { open_message_id: 'om_card' },
+  };
+}
+
 function deferred<T>() {
   let resolve!: (v: T) => void;
   let reject!: (e: unknown) => void;
@@ -298,6 +328,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(deleteMessage).mockReset().mockResolvedValue(true);
   vi.mocked(teardownAuthoritativePersistentBackingBeforeClose).mockImplementation(() => undefined);
+  vi.mocked(checkForgeTraexStartupAvailability).mockReturnValue({ available: true });
   vi.mocked(getBot).mockImplementation(() => ({
     config: { larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
     resolvedAllowedUsers: [],
@@ -1027,6 +1058,7 @@ describe('TraeX 统一初始化卡', () => {
     );
 
     expect(result?.toast?.type).toBe('success');
+    expect(ds.session.traexForgeMode).toBe('forge-pipeline');
     expect(buildNewTopicCliInput).toHaveBeenCalledWith(
       '[上下文]$forge-pipeline\n修复导出按钮',
       ds.session.sessionId,
@@ -1066,6 +1098,7 @@ describe('TraeX 统一初始化卡', () => {
     );
 
     expect(result?.toast?.type).toBe('success');
+    expect(ds.session.traexForgeMode).toBe('forge-pilot');
     expect(buildNewTopicCliInput).toHaveBeenCalledWith(
       '[上下文]$forge-pilot\n继续实现',
       ds.session.sessionId,
@@ -1147,6 +1180,174 @@ describe('TraeX 统一初始化卡', () => {
     expect(ds.workingDir).toBe('/repos/beta');
     expect(buildNewTopicCliInput).toHaveBeenCalledWith(
       '[上下文]$forge-pipeline\n继续实现',
+      ds.session.sessionId,
+      'traex',
+      undefined,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      expect.any(Object),
+      expect.any(String),
+      undefined,
+      expect.any(Object),
+    );
+  });
+
+  it('Forge doctor 不通过时旧卡选择或提交 Forge 都会被拒绝', async () => {
+    vi.mocked(checkForgeTraexStartupAvailability).mockReturnValue({ available: false, reason: 'doctor failed' });
+    const ds = makeTraexDs();
+    const { deps } = makeDeps(ds);
+
+    const selected = await handleCardAction(
+      makeTraexSelectEvent('traex_init_mode', 'forge-pilot'),
+      deps,
+      APP_ID,
+    );
+    expect(selected?.toast?.type).toBe('error');
+    expect(selected?.toast?.content).toContain('暂不能选择 Forge');
+    expect(ds.pendingTraexInitialization?.mode).toBe('traex');
+
+    const started = await handleCardAction(
+      makeTraexInitEvent('traex_init_start', {
+        mode: 'forge-pipeline',
+        prompt: '继续实现',
+      }),
+      deps,
+      APP_ID,
+    );
+    expect(started?.toast?.type).toBe('error');
+    expect(started?.toast?.content).toContain('暂不能选择 Forge');
+    expect(ds.session.traexForgeMode).toBeUndefined();
+    expect(forkWorker).not.toHaveBeenCalled();
+  });
+
+  it('Forge 不可用时未提交 mode 仍按普通 TraeX 启动', async () => {
+    vi.mocked(checkForgeTraexStartupAvailability).mockReturnValue({ available: false, reason: 'doctor failed' });
+    const ds = makeTraexDs();
+    const { deps } = makeDeps(ds);
+
+    const result = await handleCardAction(
+      makeTraexInitEvent('traex_init_start', {
+        prompt: '继续实现',
+      }),
+      deps,
+      APP_ID,
+    );
+
+    expect(result?.toast?.type).toBe('success');
+    expect(ds.session.traexForgeMode).toBeUndefined();
+    expect(buildNewTopicCliInput).toHaveBeenCalledWith(
+      '[上下文]继续实现',
+      ds.session.sessionId,
+      'traex',
+      undefined,
+      undefined,
+      undefined,
+      [],
+      undefined,
+      expect.any(Object),
+      expect.any(String),
+      undefined,
+      expect.any(Object),
+    );
+    expect(forkWorker).toHaveBeenCalledWith(
+      ds,
+      { content: 'mock-prompt' },
+      { turnId: 'om_initial_turn' },
+    );
+  });
+
+  it('手动目录按钮只暂存目录，最终启动才提交提示词和目录', async () => {
+    const ds = makeTraexDs();
+    const { deps } = makeDeps(ds);
+    const manualDir = mkdtempSync(join(tmpdir(), 'botmux-traex-manual-'));
+
+    try {
+      const selected = await handleCardAction(
+        makeTraexManualSelectEvent(manualDir),
+        deps,
+        APP_ID,
+      );
+      expect(selected?.toast?.type).toBe('success');
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(ds.pendingTraexInitialization?.selection).toMatchObject({
+        kind: 'directory',
+        path: manualDir,
+      });
+
+      const result = await handleCardAction(
+        makeTraexInitEvent('traex_init_start', {
+          mode: 'forge-pipeline',
+          prompt: '继续实现',
+        }),
+        deps,
+        APP_ID,
+      );
+
+      expect(result?.toast?.type).toBe('success');
+      expect(ds.workingDir).toBe(manualDir);
+      expect(buildNewTopicCliInput).toHaveBeenCalledWith(
+        '[上下文]$forge-pipeline\n继续实现',
+        ds.session.sessionId,
+        'traex',
+        undefined,
+        undefined,
+        undefined,
+        [],
+        undefined,
+        expect.any(Object),
+        expect.any(String),
+        undefined,
+        expect.any(Object),
+      );
+    } finally {
+      rmSync(manualDir, { recursive: true, force: true });
+    }
+  });
+
+  it('多仓 worktree 在初始化卡里先暂存，启动时再按编辑后的提示词创建 worktree', async () => {
+    const ds = makeTraexDs();
+    const { deps } = makeDeps(ds);
+    vi.mocked(createRepoWorktree)
+      .mockResolvedValueOnce({ path: '/repos/feat-combo/alpha', branch: 'feat/combo' } as any)
+      .mockResolvedValueOnce({ path: '/repos/feat-combo/beta', branch: 'feat/combo' } as any);
+
+    const selected = await handleCardAction(
+      makeTraexWorktreeMultiSelectEvent(['/repos/alpha', '/repos/beta'], 'feat/combo'),
+      deps,
+      APP_ID,
+    );
+    expect(selected?.toast?.type).toBe('success');
+    expect(forkWorker).not.toHaveBeenCalled();
+    expect(ds.pendingTraexInitialization?.selection).toMatchObject({
+      kind: 'worktree',
+      repoPaths: ['/repos/alpha', '/repos/beta'],
+      branch: 'feat/combo',
+      parentPath: '/repos/feat-combo',
+    });
+
+    const result = await handleCardAction(
+      makeTraexInitEvent('traex_init_start', {
+        mode: 'forge-pilot',
+        prompt: '实现组合任务',
+      }),
+      deps,
+      APP_ID,
+    );
+
+    expect(result?.toast?.type).toBe('info');
+    await vi.waitFor(() => expect(ds.worktreeCreating).toBe(false));
+    expect(createRepoWorktree).toHaveBeenCalledWith('/repos/alpha', expect.objectContaining({
+      branch: 'feat/combo',
+      worktreePath: '/repos/feat-combo/alpha',
+    }));
+    expect(createRepoWorktree).toHaveBeenCalledWith('/repos/beta', expect.objectContaining({
+      branch: 'feat/combo',
+      worktreePath: '/repos/feat-combo/beta',
+    }));
+    expect(buildNewTopicCliInput).toHaveBeenCalledWith(
+      '[上下文]$forge-pilot\n实现组合任务',
       ds.session.sessionId,
       'traex',
       undefined,

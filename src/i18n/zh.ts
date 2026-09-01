@@ -106,6 +106,7 @@ export const messages: Record<string, string> = {
   'card.traex_init.in_progress': '会话正在初始化，请勿重复提交',
   'card.traex_init.repo_not_found': '所选仓库已不存在，请重新选择',
   'card.traex_init.mode_selected': '已选择启动方式',
+  'card.traex_init.forge_unavailable': '当前机器未安装 Forge，或 forge doctor 存在阻塞错误，暂不能选择 Forge 启动方式',
   'card.traex_init.repo_selected': '已选择工作目录：{path}',
   'card.traex_init.worktree_selected': '已选择从 {name} 新建 worktree',
   'card.traex_init.cancelled_title': '初始化已取消',

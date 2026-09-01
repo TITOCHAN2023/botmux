@@ -109,6 +109,7 @@ import * as scheduler from './core/scheduler.js';
 import { scanProjects, scanMultipleProjects, type ProjectInfo } from './services/project-scanner.js';
 import { buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
 import { buildTraexInitializationCard } from './im/lark/traex-initialization-card.js';
+import { checkForgeTraexStartupAvailability } from './core/forge-availability.js';
 import { isLocalCliOpenReady } from './services/local-cli-opener.js';
 import { RECEIVED_REACTION_EMOJI_TYPE, SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE } from './core/pending-response.js';
 import { t as tr, botLocale, localeForBot } from './i18n/index.js';
@@ -16817,11 +16818,21 @@ async function postTraexInitializationCard(input: {
   );
   sessionStore.updateSession(ds.session);
   try {
+    const forgeAvailability = checkForgeTraexStartupAvailability();
+    if (!forgeAvailability.available) {
+      pending.mode = 'traex';
+      if (ds.session.traexForgeMode) {
+        delete ds.session.traexForgeMode;
+        sessionStore.updateSession(ds.session);
+      }
+    }
     const cardJson = buildTraexInitializationCard({
       rootId: anchor,
       pending,
       projects,
       locale: localeForBot(larkAppId),
+      multiPicker: getBot(larkAppId).config.worktreeMultiPicker,
+      forgeAvailable: forgeAvailability.available,
     });
     ds.repoCardMessageId = await sessionReply(
       anchor,
